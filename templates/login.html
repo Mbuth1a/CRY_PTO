@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>FraudLab — Synthetic Exchange</title>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="container small">
+    <div class="warning">
+        SYNTHETIC LAB ONLY — NO REAL MONEY, EXCHANGES OR PAYMENT NETWORKS
+    </div>
+    <div class="card">
+        <h1>FraudLab Exchange</h1>
+        <p class="muted">Controlled trading-platform simulator.</p>
+
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/login/">
+            {% csrf_token %}
+            <label>Username</label>
+            <input name="username" value="labuser">
+
+            <label>Password</label>
+            <input type="password" name="password" value="LabOnly-ChangeMe-123!">
+
+            <button>Enter Lab</button>
+        </form>
+    </div>
+</div>
+</body>
+</html>

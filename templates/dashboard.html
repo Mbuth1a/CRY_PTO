@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>FraudLab Dashboard</title>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+    <div>
+        <strong>FraudLab</strong>
+        <span class="badge">SYNTHETIC</span>
+    </div>
+    <a href="/logout/">Logout</a>
+</header>
+
+<main class="container">
+    <div class="warning">
+        This is a controlled simulator. M-Pesa, Binance, wallets and balances are synthetic.
+    </div>
+
+    <section class="grid">
+        <div class="card">
+            <h3>BTC/USDT</h3>
+            <div id="price" class="price">
+                {% if latest %}{{ latest.price }}{% else %}--{% endif %}
+            </div>
+            <div class="muted">Synthetic market price</div>
+        </div>
+
+        <div class="card">
+            <h3>USDT Wallet</h3>
+            <div class="price">
+                {% if wallet %}{{ wallet.balance }}{% else %}0{% endif %}
+            </div>
+            <div class="muted">Demo balance only</div>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Market</h2>
+        <canvas id="chart" width="900" height="260"></canvas>
+        <button onclick="refreshMarket()">Generate synthetic tick</button>
+    </section>
+
+    <section class="grid">
+        <div class="card">
+            <h2>Demo deposits</h2>
+            <p class="muted">These endpoints never contact M-Pesa or Binance.</p>
+            <input id="depositAmount" type="number" value="1000" step="0.01">
+            <button onclick="deposit('MPESA')">Synthetic M-Pesa deposit</button>
+            <button onclick="deposit('BINANCE')">Synthetic Binance deposit</button>
+        </div>
+        <div class="card">
+            <h2>Convert synthetic KES → USDT</h2>
+
+            <p class="muted">
+                Laboratory conversion rate: 130 KES = 1 USDT.
+            </p>
+
+            <input
+                id="convertAmount"
+                type="number"
+                value="13000"                                                           
+                step="0.01"
+            >
+
+                <button onclick="convertKes()">
+                    Convert to synthetic USDT
+                </button>
+        </div>
+        <div class="card">
+            <h2>Demo withdrawal</h2>
+            <input id="withdrawAmount" type="number" value="100" step="0.01">
+            <button onclick="withdraw('MPESA')">Synthetic M-Pesa withdrawal</button>
+            <button onclick="withdraw('BINANCE')">Synthetic Binance withdrawal</button>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Synthetic position</h2>
+        <input id="quantity" type="number" value="0.01" step="0.001">
+        <select id="side">
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+        </select>
+        <button onclick="openPosition()">Open simulated position</button>
+    </section>
+
+    <section class="card">
+        <h2>Audit events</h2>
+        <div id="events"></div>
+    </section>
+
+    <section class="card">
+        <h2>Recent synthetic payments</h2>
+        <table>
+            <tr><th>Provider</th><th>Direction</th><th>Amount</th><th>Asset</th><th>Reference</th></tr>
+            {% for p in payments %}
+            <tr>
+                <td>{{ p.provider }}</td>
+                <td>{{ p.direction }}</td>
+                <td>{{ p.amount }}</td>
+                <td>{{ p.asset }}</td>
+                <td>{{ p.reference }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5">No synthetic payments.</td></tr>
+            {% endfor %}
+        </table>
+    </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
