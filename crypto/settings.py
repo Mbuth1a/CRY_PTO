@@ -26,7 +26,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "fraudlab.urls"
+ROOT_URLCONF = "crypto.urls"
 
 TEMPLATES = [
     {
@@ -43,7 +43,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "fraudlab.wsgi.application"
+WSGI_APPLICATION = "crypto.wsgi.application"
 
 DATABASES = {
     "default": {
@@ -80,12 +80,12 @@ LOGGING = {
         },
         "file": {
             "class": "logging.FileHandler",
-            "filename": BASE_DIR / "fraudlab.log",
+            "filename": BASE_DIR / "crypto.log",
             "formatter": "verbose",
         },
     },
     "loggers": {
-        "fraudlab": {
+        "crypto": {
             "handlers": ["console", "file"],
             "level": "INFO",
             "propagate": False,
