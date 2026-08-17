@@ -2,21 +2,21 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>FraudLab Dashboard</title>
+    <title>CoinBase Dashboard</title>
     <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <header>
     <div>
-        <strong>FraudLab</strong>
-        <span class="badge">SYNTHETIC</span>
+        <strong>CoinBase</strong>
+        <span class="badge">$$$$</span>
     </div>
     <a href="/logout/">Logout</a>
 </header>
 
 <main class="container">
     <div class="warning">
-        This is a controlled simulator. M-Pesa, Binance, wallets and balances are synthetic.
+        This is a controlled market. M-Pesa, Binance and wallets are in use.
     </div>
 
     <section class="grid">
@@ -25,7 +25,7 @@
             <div id="price" class="price">
                 {% if latest %}{{ latest.price }}{% else %}--{% endif %}
             </div>
-            <div class="muted">Synthetic market price</div>
+            <div class="muted">Market Price</div>
         </div>
 
         <div class="card">
@@ -33,26 +33,62 @@
             <div class="price">
                 {% if wallet %}{{ wallet.balance }}{% else %}0{% endif %}
             </div>
-            <div class="muted">Demo balance only</div>
+            <div class="muted">Wallet Balance</div>
         </div>
     </section>
 
     <section class="card">
-        <h2>Market</h2>
-        <canvas id="chart" width="900" height="260"></canvas>
-        <button onclick="refreshMarket()">Generate synthetic tick</button>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h2>Market</h2>
+                    <div class="muted">
+                        Live synthetic BTC/USDT market
+                    </div>
+                </div>
+
+                <div>
+                    <span id="marketStatus" class="badge">LIVE</span>
+                </div>
+            </div>
+
+            <div style="margin-top: 15px;">
+                <canvas
+                    id="chart"
+                    width="900"
+                    height="260"
+                    style="width: 100%; height: 260px;"
+                ></canvas>
+            </div>
+
+            <div
+                style="
+                    display: flex;
+                    justify-content: space-between;
+                    margin-top: 10px;
+                    font-size: 14px;
+                "
+            >
+                <span class="muted">
+                    Last update: <span id="lastUpdate">--</span>
+                </span>
+
+                <span class="muted">
+                    Ticks: <span id="tickCount">0</span>
+                </span>
+            </div>
     </section>
 
     <section class="grid">
+        {% csrf_token %}
         <div class="card">
             <h2>Demo deposits</h2>
             <p class="muted">These endpoints never contact M-Pesa or Binance.</p>
             <input id="depositAmount" type="number" value="1000" step="0.01">
-            <button onclick="deposit('MPESA')">Synthetic M-Pesa deposit</button>
-            <button onclick="deposit('BINANCE')">Synthetic Binance deposit</button>
+            <button onclick="deposit('MPESA')"> M-Pesa deposit</button>
+            <button onclick="deposit('BINANCE')">Binance deposit</button>
         </div>
         <div class="card">
-            <h2>Convert synthetic KES → USDT</h2>
+            <h2>Convert KES → USDT</h2>
 
             <p class="muted">
                 Laboratory conversion rate: 130 KES = 1 USDT.
@@ -66,25 +102,310 @@
             >
 
                 <button onclick="convertKes()">
-                    Convert to synthetic USDT
+                    Convert to USDT
                 </button>
         </div>
         <div class="card">
             <h2>Demo withdrawal</h2>
             <input id="withdrawAmount" type="number" value="100" step="0.01">
-            <button onclick="withdraw('MPESA')">Synthetic M-Pesa withdrawal</button>
-            <button onclick="withdraw('BINANCE')">Synthetic Binance withdrawal</button>
+            <button onclick="withdraw('MPESA')"> M-Pesa withdrawal</button>
+            <button onclick="withdraw('BINANCE')"> Binance withdrawal</button>
         </div>
     </section>
 
-    <section class="card">
-        <h2>Synthetic position</h2>
-        <input id="quantity" type="number" value="0.01" step="0.001">
-        <select id="side">
-            <option value="LONG">LONG</option>
-            <option value="SHORT">SHORT</option>
-        </select>
-        <button onclick="openPosition()">Open simulated position</button>
+        <section class="card">
+                <!-- Trading Controls -->
+                <div class="trading-controls">
+
+                    <button
+                        id="openTradeButton"
+                        class="trade-open-button"
+                        onclick="openTradeModal()"
+                    >
+                        Open Trade
+                    </button>
+
+                    <div class="market-price-box">
+                        <span>BTC/USDT</span>
+                        <strong id="tradeMarketPrice">--</strong>
+                        <small>USDT</small>
+                    </div>
+
+                </div>
+
+<!-- ============================= -->
+<!-- OPEN TRADE MODAL -->
+<!-- ============================= -->
+
+            <div
+                id="tradeModal"
+                class="trade-modal"
+                style="display: none;"
+            >
+                <div class="trade-modal-content">
+
+                    <div class="trade-modal-header">
+
+                        <div>
+                            <h2>Open Synthetic Trade</h2>
+
+                            <p class="muted">
+                                BTC/USDT
+                            </p>
+                        </div>
+
+                        <button
+                            type="button"
+                            class="modal-close"
+                            onclick="closeTradeModal()"
+                        >
+                            ×
+                        </button>
+
+                    </div>
+
+
+                    <!-- Live Market Price -->
+
+                    <div class="trade-live-price">
+
+                        <span>Market Price</span>
+
+                        <strong id="modalMarketPrice">
+                            --
+                        </strong>
+
+                        <small>
+                            USDT
+                        </small>
+
+                    </div>
+
+
+        <!-- Trade Side -->
+
+        <div class="trade-side-selector">
+
+            <button
+                type="button"
+                id="longButton"
+                class="side-button long"
+                onclick="selectTradeSide('LONG')"
+            >
+                LONG
+            </button>
+
+            <button
+                type="button"
+                id="shortButton"
+                class="side-button short"
+                onclick="selectTradeSide('SHORT')"
+            >
+                SHORT
+            </button>
+
+        </div>
+
+
+        <!-- Amount -->
+
+        <div class="trade-field">
+
+            <label for="tradeAmount">
+                Amount
+            </label>
+
+            <div class="input-with-unit">
+
+                <input
+                    id="tradeAmount"
+                    type="number"
+                    value="100"
+                    min="1"
+                    step="0.01"
+                    placeholder="Enter amount"
+                    oninput="updateTradePreview()"
+                >
+
+                <span>USDT</span>
+
+            </div>
+
+        </div>
+
+
+        <!-- Quantity -->
+
+        <div class="trade-summary">
+
+            <div>
+                <span>Estimated BTC</span>
+
+                <strong id="estimatedQuantity">
+                    --
+                </strong>
+            </div>
+
+            <div>
+                <span>Entry Price</span>
+
+                <strong id="estimatedEntryPrice">
+                    --
+                </strong>
+            </div>
+
+        </div>
+
+
+        <!-- Submit -->
+
+        <button
+            type="button"
+            id="confirmTradeButton"
+            class="confirm-trade-button"
+            onclick="confirmOpenTrade()"
+        >
+            Open LONG Trade
+        </button>
+
+    </div>
+</div>
+
+
+<!-- ============================= -->
+<!-- ACTIVE POSITION -->
+<!-- ============================= -->
+
+<div
+    id="activePosition"
+    class="active-position"
+    style="display: none;"
+>
+
+    <div class="position-header">
+
+        <div>
+            <h3>Open Position</h3>
+
+            <span class="muted">
+                Live position performance
+            </span>
+        </div>
+
+        <span
+            id="activeSide"
+            class="badge"
+        >
+            --
+        </span>
+
+    </div>
+
+
+    <div class="position-grid">
+
+        <div>
+            <span class="muted">
+                Trade Amount
+            </span>
+
+            <strong id="positionAmount">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                BTC Quantity
+            </span>
+
+            <strong id="positionQuantity">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Entry Price
+            </span>
+
+            <strong id="entryPrice">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Current Price
+            </span>
+
+            <strong id="currentPositionPrice">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Current Value
+            </span>
+
+            <strong id="currentValue">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Unrealized P&L
+            </span>
+
+            <strong id="unrealizedPnl">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Return
+            </span>
+
+            <strong id="pnlPercent">
+                --
+            </strong>
+        </div>
+
+
+        <div>
+            <span class="muted">
+                Opened
+            </span>
+
+            <strong id="positionOpenedAt">
+                --
+            </strong>
+        </div>
+
+    </div>
+
+
+    <button
+        id="closeTradeButton"
+        class="close-trade-button"
+        onclick="closeTrade()"
+    >
+        Close Trade
+    </button>
+
+</div>
+
+        </section>
+
     </section>
 
     <section class="card">
@@ -93,7 +414,7 @@
     </section>
 
     <section class="card">
-        <h2>Recent synthetic payments</h2>
+        <h2>Recent payments</h2>
         <table>
             <tr><th>Provider</th><th>Direction</th><th>Amount</th><th>Asset</th><th>Reference</th></tr>
             {% for p in payments %}

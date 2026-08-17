@@ -188,3 +188,6 @@ def synthetic_convert_kes_to_usdt(user, kes_amount, rate=Decimal("130")):
         )
 
     return conversion
+
+
+    
