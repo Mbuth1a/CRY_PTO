@@ -13,4 +13,7 @@ urlpatterns = [
     path("api/convert/", views.convert_api, name="convert_api"),
     path("api/position/", views.position_api, name="position_api"),
     path("api/events/", views.events_api, name="events_api"),
+    path( "api/market/history/", views.market_history, name="market_history"),
+    path("api/market/candles/", views.market_candles, name="market_candles",
+    ),
 ]

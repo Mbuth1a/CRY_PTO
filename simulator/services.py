@@ -1,11 +1,18 @@
 import logging
+from datetime import timedelta
 import random
 import uuid
 from decimal import Decimal
+from django.utils import timezone
+from django.db import transaction
+from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 
-from .models import AuditEvent, DemoWallet, MarketTick, Position, SyntheticPayment
+from .models import Position, MarketTick
+
+from .models import AuditEvent, DemoWallet, MarketTick, Position, SyntheticPayment, MarketCandle
 
 logger = logging.getLogger("fraudlab")
 
@@ -24,11 +31,109 @@ def audit(event_type, message, user=None, severity="INFO", metadata=None, ip_add
 
 
 def generate_market_tick():
-    latest = MarketTick.objects.filter(symbol="BTCUSDT").first()
-    base = latest.price if latest else Decimal("65000")
-    movement = Decimal(str(random.uniform(-0.012, 0.012)))
-    price = (base * (Decimal("1") + movement)).quantize(Decimal("0.00000001"))
-    return MarketTick.objects.create(symbol="BTCUSDT", price=price)
+    latest = (
+        MarketTick.objects
+        .filter(symbol="BTCUSDT")
+        .first()
+    )
+
+    base = latest.price if latest else Decimal("5")
+
+    movement = Decimal(
+        str(random.uniform(-0.0013, 0.0013))
+    )
+
+    price = (
+        base * (Decimal("1") + movement)
+    ).quantize(
+        Decimal("0.00000001")
+    )
+
+    tick = MarketTick.objects.create(
+        symbol="BTCUSDT",
+        price=price,
+    )
+
+    update_market_candle(tick)
+
+    return tick
+
+
+def update_market_candle(tick):
+    """
+    Add a MarketTick to its corresponding 1-minute candle.
+
+    The candle is created when the first tick arrives.
+    Subsequent ticks update high, low and close.
+    """
+
+    bucket_start = tick.created_at.replace(
+        second=0,
+        microsecond=0,
+    )
+
+    candle, created = MarketCandle.objects.get_or_create(
+        symbol=tick.symbol,
+        timeframe="1m",
+        bucket_start=bucket_start,
+        defaults={
+            "open": tick.price,
+            "high": tick.price,
+            "low": tick.price,
+            "close": tick.price,
+            "tick_count": 1,
+        },
+    )
+
+    if not created:
+        candle.high = max(candle.high, tick.price)
+        candle.low = min(candle.low, tick.price)
+        candle.close = tick.price
+        candle.tick_count += 1
+        candle.save(
+            update_fields=[
+                "high",
+                "low",
+                "close",
+                "tick_count",
+                "updated_at",
+            ]
+        )
+
+    return candle
+
+def get_latest_market_tick(symbol="BTCUSDT"):
+    """
+    Return the most recent persisted market tick.
+
+    This is the single source of truth for:
+    - chart updates
+    - opening trades
+    - closing trades
+    """
+
+    return (
+        MarketTick.objects
+        .filter(symbol=symbol)
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+def get_latest_market_price(symbol="BTCUSDT"):
+    """
+    Return the latest persisted market price.
+    """
+
+    tick = get_latest_market_tick(symbol)
+
+    if tick is None:
+        raise ValueError(
+            f"No market tick available for {symbol}"
+        )
+
+    return tick.price
+
 
 
 @transaction.atomic
@@ -100,25 +205,6 @@ def synthetic_withdrawal(user, provider, amount, asset):
     return payment
 
 
-def open_position(user, quantity, side="LONG"):
-    tick = MarketTick.objects.filter(symbol="BTCUSDT").first()
-    if not tick:
-        tick = generate_market_tick()
-
-    position = Position.objects.create(
-        user=user,
-        quantity=Decimal(str(quantity)),
-        entry_price=tick.price,
-        side=side,
-    )
-
-    audit(
-        "POSITION_OPENED",
-        f"Synthetic {side} position opened at {tick.price}",
-        user=user,
-        metadata={"quantity": str(quantity), "price": str(tick.price)},
-    )
-    return position
 
 def synthetic_convert_kes_to_usdt(user, kes_amount, rate=Decimal("130")):
     """Convert synthetic KES into synthetic USDT inside the lab only."""
@@ -189,5 +275,124 @@ def synthetic_convert_kes_to_usdt(user, kes_amount, rate=Decimal("130")):
 
     return conversion
 
+def get_latest_market_tick(symbol="BTCUSDT"):
+    """
+    Single server-authoritative source for the latest market price.
+    """
 
-    
+    return (
+        MarketTick.objects
+        .filter(symbol=symbol)
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+@transaction.atomic
+def open_position(
+    user,
+    quantity,
+    side,
+    symbol="BTCUSDT"
+):
+    """
+    Open a position using the latest persisted MarketTick.
+
+    The browser NEVER supplies the entry price.
+    """
+
+    quantity = Decimal(str(quantity))
+
+    side = side.upper()
+
+    if quantity <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+
+    if side not in ("LONG", "SHORT"):
+        raise ValueError("Invalid trade side.")
+
+    # Prevent multiple simultaneous open positions
+    existing = (
+        Position.objects
+        .select_for_update()
+        .filter(
+            user=user,
+            status="OPEN"
+        )
+        .first()
+    )
+
+    if existing:
+        raise ValueError(
+            "You already have an open position."
+        )
+
+    # SERVER AUTHORITATIVE PRICE
+    tick = get_latest_market_tick(symbol)
+
+    if tick is None:
+        raise ValueError(
+            f"No market price available for {symbol}."
+        )
+
+    position = Position.objects.create(
+        user=user,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        entry_price=tick.price,
+        status="OPEN"
+    )
+
+    return position, tick
+
+
+@transaction.atomic
+def close_position(
+    user,
+    symbol="BTCUSDT"
+):
+    """
+    Close the user's active position using
+    the latest persisted MarketTick.
+
+    The browser NEVER supplies the exit price.
+    """
+
+    position = (
+        Position.objects
+        .select_for_update()
+        .filter(
+            user=user,
+            symbol=symbol,
+            status="OPEN"
+        )
+        .first()
+    )
+
+    if position is None:
+        raise ValueError(
+            "No open position found."
+        )
+
+    # SERVER AUTHORITATIVE EXIT PRICE
+    tick = get_latest_market_tick(symbol)
+
+    if tick is None:
+        raise ValueError(
+            f"No market price available for {symbol}."
+        )
+
+    position.exit_price = tick.price
+    position.closed_at = tick.created_at
+    position.status = "CLOSED"
+
+    position.save(
+        update_fields=[
+            "exit_price",
+            "closed_at",
+            "status",
+        ]
+    )
+
+    return position, tick

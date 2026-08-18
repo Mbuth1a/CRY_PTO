@@ -5,7 +5,7 @@ function csrfToken() {
 
 const priceHistory = [];
 const MAX_POINTS = 60;
-
+let candleHistory = [];
 let tickCount = 0;
 
 function addPricePoint(price) {
@@ -43,12 +43,25 @@ function drawMarketChart() {
 
     ctx.clearRect(0, 0, width, height);
 
-    if (priceHistory.length === 0) {
+    if (candleHistory.length === 0) {
+        ctx.fillStyle = "#666";
+        ctx.font = "14px Arial";
         ctx.fillText("Waiting for market data...", 20, 30);
         return;
     }
 
-    const prices = priceHistory.map(point => point.price);
+    // --------------------------------------------------
+    // PRICE RANGE
+    // --------------------------------------------------
+
+    const prices = [];
+
+    candleHistory.forEach(candle => {
+        prices.push(
+            Number(candle.high),
+            Number(candle.low)
+        );
+    });
 
     let minPrice = Math.min(...prices);
     let maxPrice = Math.max(...prices);
@@ -59,83 +72,310 @@ function drawMarketChart() {
         maxPrice += 1;
     }
 
-    const padding = 45;
-    const chartWidth = width - padding * 2;
-    const chartHeight = height - padding * 2;
+    // Add a little visual breathing room
+    const priceRange = maxPrice - minPrice;
 
-    // Grid
+    minPrice -= priceRange * 0.05;
+    maxPrice += priceRange * 0.05;
+
+    // --------------------------------------------------
+    // CHART DIMENSIONS
+    // --------------------------------------------------
+
+    const paddingTop = 20;
+    const paddingRight = 60;
+    const paddingBottom = 30;
+    const paddingLeft = 50;
+
+    const chartWidth =
+        width - paddingLeft - paddingRight;
+
+    const chartHeight =
+        height - paddingTop - paddingBottom;
+
+    // --------------------------------------------------
+    // PRICE → CANVAS Y
+    // --------------------------------------------------
+
+    function priceToY(price) {
+        return (
+            paddingTop +
+            ((maxPrice - price) /
+                (maxPrice - minPrice)) *
+                chartHeight
+        );
+    }
+
+    // --------------------------------------------------
+    // GRID
+    // --------------------------------------------------
+
     ctx.strokeStyle = "#dddddd";
     ctx.lineWidth = 1;
 
+    ctx.fillStyle = "#666";
+    ctx.font = "11px Arial";
+
     for (let i = 0; i <= 4; i++) {
-        const y = padding + (chartHeight / 4) * i;
+        const y =
+            paddingTop +
+            (chartHeight / 4) * i;
 
         ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(width - padding, y);
+        ctx.moveTo(paddingLeft, y);
+        ctx.lineTo(width - paddingRight, y);
         ctx.stroke();
 
         const value =
             maxPrice -
             ((maxPrice - minPrice) / 4) * i;
 
-        ctx.fillStyle = "#666";
-        ctx.font = "11px Arial";
-
         ctx.fillText(
             value.toFixed(2),
-            5,
+            width - paddingRight + 5,
             y + 4
         );
     }
 
-    // Price line
-    ctx.beginPath();
+    // --------------------------------------------------
+    // CANDLE WIDTH
+    // --------------------------------------------------
 
-    priceHistory.forEach((point, index) => {
+    const candleSpacing =
+        chartWidth /
+        Math.max(candleHistory.length, 1);
+
+    const candleWidth =
+        Math.max(
+            3,
+            Math.min(
+                16,
+                candleSpacing * 0.65
+            )
+        );
+
+    // --------------------------------------------------
+    // DRAW CANDLES
+    // --------------------------------------------------
+
+    candleHistory.forEach((candle, index) => {
+
+        const open = Number(candle.open);
+        const high = Number(candle.high);
+        const low = Number(candle.low);
+        const close = Number(candle.close);
+
         const x =
-            padding +
-            (index / Math.max(priceHistory.length - 1, 1)) *
-            chartWidth;
+            paddingLeft +
+            candleSpacing * index +
+            candleSpacing / 2;
 
-        const y =
-            padding +
-            ((maxPrice - point.price) /
-                (maxPrice - minPrice)) *
-            chartHeight;
+        const highY = priceToY(high);
+        const lowY = priceToY(low);
+        const openY = priceToY(open);
+        const closeY = priceToY(close);
 
-        if (index === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
+        // ----------------------------------------------
+        // Determine candle direction
+        // ----------------------------------------------
+
+        const bullish = close >= open;
+
+        // ----------------------------------------------
+        // Wick
+        // ----------------------------------------------
+
+        ctx.beginPath();
+
+        ctx.moveTo(x, highY);
+        ctx.lineTo(x, lowY);
+
+        ctx.strokeStyle =
+            bullish
+                ? "#2e8b57"
+                : "#d9534f";
+
+        ctx.lineWidth = 1;
+
+        ctx.stroke();
+
+        // ----------------------------------------------
+        // Candle body
+        // ----------------------------------------------
+
+        let bodyTop = Math.min(
+            openY,
+            closeY
+        );
+
+        let bodyBottom = Math.max(
+            openY,
+            closeY
+        );
+
+        let bodyHeight =
+            bodyBottom - bodyTop;
+
+        // Ensure tiny candles remain visible
+        if (bodyHeight < 2) {
+            bodyHeight = 2;
+
+            bodyTop =
+                ((openY + closeY) / 2) -
+                1;
         }
+
+        ctx.fillStyle =
+            bullish
+                ? "#2e8b57"
+                : "#d9534f";
+
+        ctx.fillRect(
+            x - candleWidth / 2,
+            bodyTop,
+            candleWidth,
+            bodyHeight
+        );
     });
 
-    ctx.strokeStyle = "#ff8c00";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // --------------------------------------------------
+    // LATEST PRICE
+    // --------------------------------------------------
 
-    // Latest price point
-    const latest = priceHistory[priceHistory.length - 1];
+    const latest =
+        candleHistory[
+            candleHistory.length - 1
+        ];
 
-    const latestX =
-        padding +
-        ((priceHistory.length - 1) /
-            Math.max(priceHistory.length - 1, 1)) *
-        chartWidth;
+    const latestPrice =
+        Number(latest.close);
 
     const latestY =
-        padding +
-        ((maxPrice - latest.price) /
-            (maxPrice - minPrice)) *
-        chartHeight;
+        priceToY(latestPrice);
 
+    // Horizontal price line
     ctx.beginPath();
-    ctx.arc(latestX, latestY, 4, 0, Math.PI * 2);
 
+    ctx.moveTo(
+        paddingLeft,
+        latestY
+    );
+
+    ctx.lineTo(
+        width - paddingRight,
+        latestY
+    );
+
+    ctx.strokeStyle = "#ff8c00";
+    ctx.lineWidth = 1;
+
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Latest price label
     ctx.fillStyle = "#ff8c00";
-    ctx.fill();
+    ctx.font = "bold 11px Arial";
+
+    ctx.fillText(
+        latestPrice.toFixed(2),
+        width - paddingRight + 5,
+        latestY + 4
+    );
 }
+
+async function loadMarketCandles() {
+    try {
+        const response = await fetch(
+            "/api/market/candles/?symbol=BTCUSDT&limit=100"
+        );
+
+        if (!response.ok) {
+            throw new Error(
+                `HTTP ${response.status}`
+            );
+        }
+
+        const result = await response.json();
+
+        candleHistory = result.data || [];
+
+        drawMarketChart();
+
+    } catch (error) {
+        console.error(
+            "Failed to load market candles:",
+            error
+        );
+    }
+}
+loadMarketCandles();
+
+async function updateLatestCandle() {
+    try {
+        const response = await fetch(
+            "/api/market/candles/?symbol=BTCUSDT&limit=1"
+        );
+
+        if (!response.ok) {
+            throw new Error(
+                `HTTP ${response.status}`
+            );
+        }
+
+        const result = await response.json();
+
+        if (!result.data || result.data.length === 0) {
+            return;
+        }
+
+        const latest =
+            result.data[0];
+
+        if (candleHistory.length === 0) {
+            candleHistory.push(latest);
+        } else {
+            const last =
+                candleHistory[
+                    candleHistory.length - 1
+                ];
+
+            if (
+                last.time === latest.time
+            ) {
+                // Same minute:
+                // update the existing candle
+                candleHistory[
+                    candleHistory.length - 1
+                ] = latest;
+
+            } else {
+                // New minute:
+                // add a new candle
+                candleHistory.push(latest);
+
+                // Keep chart manageable
+                if (
+                    candleHistory.length > 100
+                ) {
+                    candleHistory.shift();
+                }
+            }
+        }
+
+        drawMarketChart();
+
+    } catch (error) {
+        console.error(
+            "Failed to update candle:",
+            error
+        );
+    }
+}
+setInterval(
+    updateLatestCandle,
+    1000
+);
 async function postForm(url, data) {
     const body = new URLSearchParams(data);
     body.append('csrfmiddlewaretoken', csrfToken());
@@ -232,10 +472,17 @@ async function refreshEvents() {
     `).join('');
 }
 
-window.addEventListener('load', async () => {
-    await refreshMarket();
-    await refreshEvents();
-});
+window.addEventListener(
+    "load",
+    async () => {
+
+        await refreshMarket();
+
+        await refreshEvents();
+
+        await updatePosition();
+    }
+);
 
 async function convertKes() {
     const amount =
@@ -355,25 +602,35 @@ function updateTradePreview() {
 
     const amount =
         Number(
-            document.getElementById("tradeAmount").value
+            document.getElementById(
+                "tradeAmount"
+            ).value
         );
 
     const price =
         Number(currentMarketPrice);
 
-    document.getElementById("modalMarketPrice")
-        .textContent =
+    document.getElementById(
+        "modalMarketPrice"
+    ).textContent =
         price > 0
             ? price.toFixed(2)
             : "--";
 
-    if (!price || price <= 0 || !amount || amount <= 0) {
+    if (
+        !price ||
+        price <= 0 ||
+        !amount ||
+        amount <= 0
+    ) {
 
-        document.getElementById("estimatedQuantity")
-            .textContent = "--";
+        document.getElementById(
+            "estimatedQuantity"
+        ).textContent = "--";
 
-        document.getElementById("estimatedEntryPrice")
-            .textContent = "--";
+        document.getElementById(
+            "estimatedEntryPrice"
+        ).textContent = "--";
 
         return;
     }
@@ -381,22 +638,25 @@ function updateTradePreview() {
     const quantity =
         amount / price;
 
-    document.getElementById("estimatedQuantity")
-        .textContent =
-        quantity.toFixed(8) + " BTC";
+    document.getElementById(
+        "estimatedQuantity"
+    ).textContent =
+        quantity.toFixed(8) +
+        " BTC";
 
-    document.getElementById("estimatedEntryPrice")
-        .textContent =
-        price.toFixed(2) + " USDT";
+    document.getElementById(
+        "estimatedEntryPrice"
+    ).textContent =
+        price.toFixed(2) +
+        " USDT";
 }
 
-function confirmOpenTrade() {
+async function confirmOpenTrade() {
 
-    if (!currentMarketPrice ||
-        currentMarketPrice <= 0) {
+    if (activePosition !== null) {
 
         alert(
-            "The synthetic market is not available yet."
+            "You already have an open position."
         );
 
         return;
@@ -404,7 +664,9 @@ function confirmOpenTrade() {
 
     const amount =
         Number(
-            document.getElementById("tradeAmount").value
+            document.getElementById(
+                "tradeAmount"
+            ).value
         );
 
     if (!amount || amount <= 0) {
@@ -416,81 +678,479 @@ function confirmOpenTrade() {
         return;
     }
 
-    if (activePosition !== null) {
+    if (
+        !currentMarketPrice ||
+        currentMarketPrice <= 0
+    ) {
 
         alert(
-            "You already have an open position."
+            "The synthetic market is not available yet."
         );
 
         return;
     }
 
+    /*
+     * Quantity is calculated from the current
+     * displayed market price ONLY for the order request.
+     *
+     * The server determines the authoritative
+     * entry price.
+     */
+
     const quantity =
         amount / currentMarketPrice;
 
-    activePosition = {
+    const button =
+        document.getElementById(
+            "confirmTradeButton"
+        );
 
-        side: selectedTradeSide,
+    button.disabled = true;
 
-        amount: amount,
+    button.textContent =
+        "Opening...";
 
-        quantity: quantity,
+    try {
 
-        entryPrice: currentMarketPrice,
+        const result =
+            await positionRequest(
+                "POST",
+                {
+                    quantity:
+                        quantity.toFixed(8),
 
-        openedAt: new Date()
-    };
+                    side:
+                        selectedTradeSide
+                }
+            );
 
-    console.log(
-        "Synthetic trade opened:",
-        activePosition
-    );
+        /*
+         * IMPORTANT:
+         *
+         * Use the price returned by Django.
+         */
 
-    closeTradeModal();
+        const position =
+            result.position;
 
-    displayActivePosition();
+        activePosition = {
 
-    updatePosition();
+            id: position.id,
+
+            side: position.side,
+
+            quantity:
+                Number(position.quantity),
+
+            entryPrice:
+                Number(position.entry_price),
+
+            amount:
+                Number(position.quantity) *
+                Number(position.entry_price),
+
+            openedAt:
+                new Date(position.opened_at)
+        };
+
+        closeTradeModal();
+
+        displayActivePosition();
+
+        await updatePosition();
+
+    } catch (error) {
+
+        console.error(
+            "Failed to open trade:",
+            error
+        );
+
+        alert(
+            "Unable to open trade: " +
+            error.message
+        );
+
+    } finally {
+
+        button.disabled = false;
+
+        button.textContent =
+            `Open ${selectedTradeSide} Trade`;
+    }
 }
-
 function displayActivePosition() {
+
+    if (!activePosition) {
+
+        document.getElementById(
+            "activePosition"
+        ).style.display = "none";
+
+        return;
+    }
 
     const position =
         activePosition;
 
-    if (!position) {
-        return;
-    }
+    document.getElementById(
+        "activePosition"
+    ).style.display = "block";
 
-    document.getElementById("activePosition")
-        .style.display = "block";
-
-    document.getElementById("positionStatus")
-        .textContent =
+    document.getElementById(
+        "positionStatus"
+    ).textContent =
         "OPEN " + position.side;
 
-    document.getElementById("activeSide")
-        .textContent =
+    document.getElementById(
+        "activeSide"
+    ).textContent =
         position.side;
 
-    document.getElementById("positionAmount")
-        .textContent =
+    document.getElementById(
+        "positionAmount"
+    ).textContent =
         position.amount.toFixed(2) +
         " USDT";
 
-    document.getElementById("positionQuantity")
-        .textContent =
+    document.getElementById(
+        "positionQuantity"
+    ).textContent =
         position.quantity.toFixed(8) +
         " BTC";
 
-    document.getElementById("entryPrice")
-        .textContent =
+    document.getElementById(
+        "entryPrice"
+    ).textContent =
         position.entryPrice.toFixed(2) +
         " USDT";
 
-    document.getElementById("positionOpenedAt")
-        .textContent =
+    document.getElementById(
+        "positionOpenedAt"
+    ).textContent =
         position.openedAt.toLocaleTimeString();
 }
 
+async function closeTrade() {
 
+    if (!activePosition) {
+
+        alert(
+            "There is no open position."
+        );
+
+        return;
+    }
+
+    const button =
+        document.getElementById(
+            "closeTradeButton"
+        );
+
+    if (!confirm(
+        "Are you sure you want to close this trade?"
+    )) {
+
+        return;
+    }
+
+    button.disabled = true;
+
+    button.textContent =
+        "Closing...";
+
+    try {
+
+        const result =
+            await positionRequest(
+                "DELETE"
+            );
+
+        const closed =
+            result.position;
+
+        /*
+         * EXIT PRICE comes from Django.
+         */
+
+        const exitPrice =
+            Number(
+                closed.exit_price
+            );
+
+        const realizedPnl =
+            Number(
+                closed.realized_pnl
+            );
+
+        /*
+         * Show final result before clearing.
+         */
+
+        alert(
+            "Trade closed.\n\n" +
+            "Exit Price: " +
+            exitPrice.toFixed(2) +
+            " USDT\n" +
+            "Realized P&L: " +
+            realizedPnl.toFixed(2) +
+            " USDT"
+        );
+
+        activePosition = null;
+
+        document.getElementById(
+            "activePosition"
+        ).style.display = "none";
+
+        document.getElementById(
+            "positionStatus"
+        ).textContent =
+            "NO POSITION";
+
+        document.getElementById(
+            "positionStatus"
+        ).style.backgroundColor =
+            "";
+
+        await updatePosition();
+
+    } catch (error) {
+
+        console.error(
+            "Failed to close trade:",
+            error
+        );
+
+        alert(
+            "Unable to close trade: " +
+            error.message
+        );
+
+    } finally {
+
+        button.disabled = false;
+
+        button.textContent =
+            "Close Trade";
+    }
+}
+
+async function updatePosition() {
+
+    try {
+
+        const result =
+            await positionRequest(
+                "GET"
+            );
+
+        if (!result.open) {
+
+            activePosition = null;
+
+            document.getElementById(
+                "activePosition"
+            ).style.display = "none";
+
+            document.getElementById(
+                "positionStatus"
+            ).textContent =
+                "NO POSITION";
+
+            return;
+        }
+
+        const position =
+            result.position;
+
+        /*
+         * Synchronize the browser with
+         * the server's position.
+         */
+
+        activePosition = {
+
+            id: position.id,
+
+            side: position.side,
+
+            quantity:
+                Number(position.quantity),
+
+            entryPrice:
+                Number(position.entry_price),
+
+            amount:
+                Number(position.quantity) *
+                Number(position.entry_price),
+
+            openedAt:
+                new Date(position.opened_at)
+        };
+
+        displayActivePosition();
+
+        /*
+         * SERVER AUTHORITATIVE CURRENT PRICE
+         */
+
+        const currentPrice =
+            Number(
+                position.current_price
+            );
+
+        const pnl =
+            Number(
+                position.unrealized_pnl
+            );
+
+        const pnlPercent =
+            Number(
+                position.pnl_percent
+            );
+
+        document.getElementById(
+            "currentPositionPrice"
+        ).textContent =
+            currentPrice.toFixed(2) +
+            " USDT";
+
+        document.getElementById(
+            "currentValue"
+        ).textContent =
+            Number(
+                position.current_value
+            ).toFixed(2) +
+            " USDT";
+
+        document.getElementById(
+            "unrealizedPnl"
+        ).textContent =
+            pnl.toFixed(2) +
+            " USDT";
+
+        document.getElementById(
+            "pnlPercent"
+        ).textContent =
+            pnlPercent.toFixed(2) +
+            "%";
+
+        /*
+         * Visual P&L state
+         */
+
+        const pnlElement =
+            document.getElementById(
+                "unrealizedPnl"
+            );
+
+        const percentElement =
+            document.getElementById(
+                "pnlPercent"
+            );
+
+        if (pnl > 0) {
+
+            pnlElement.style.color =
+                "#198754";
+
+            percentElement.style.color =
+                "#198754";
+
+        } else if (pnl < 0) {
+
+            pnlElement.style.color =
+                "#dc3545";
+
+            percentElement.style.color =
+                "#dc3545";
+
+        } else {
+
+            pnlElement.style.color =
+                "#666";
+
+            percentElement.style.color =
+                "#666";
+        }
+
+    } catch (error) {
+
+        console.error(
+            "Position update failed:",
+            error
+        );
+    }
+}
+
+setInterval(
+    updatePosition,
+    1000
+);
+
+function getCookie(name) {
+
+    const cookies = document.cookie.split(";");
+
+    for (let cookie of cookies) {
+
+        cookie = cookie.trim();
+
+        if (cookie.startsWith(name + "=")) {
+
+            return decodeURIComponent(
+                cookie.substring(name.length + 1)
+            );
+        }
+    }
+
+    return null;
+}
+
+function getCsrfToken() {
+    return getCookie("csrftoken");
+}
+
+async function positionRequest(method, body = null) {
+
+    const headers = {
+        "Accept": "application/json",
+        "X-CSRFToken": getCsrfToken()
+    };
+
+    const options = {
+        method: method,
+        headers: headers,
+        credentials: "same-origin"
+    };
+
+    if (body) {
+
+        options.body =
+            new URLSearchParams(body);
+
+        headers["Content-Type"] =
+            "application/x-www-form-urlencoded";
+    }
+
+    const response =
+        await fetch(
+            "/api/position/",
+            options
+        );
+
+    const data =
+        await response.json();
+
+    if (!response.ok) {
+
+        throw new Error(
+            data.error ||
+            `HTTP ${response.status}`
+        );
+    }
+
+    return data;
+}
