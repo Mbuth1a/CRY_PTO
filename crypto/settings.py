@@ -13,7 +13,8 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "simulator",
+    "simulator.apps.SimulatorConfig",
+    
 ]
 
 MIDDLEWARE = [
@@ -92,3 +93,5 @@ LOGGING = {
         },
     },
 }
+
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True

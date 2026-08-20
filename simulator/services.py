@@ -1,21 +1,91 @@
 import logging
+import hashlib
+import json
+import re
 from datetime import timedelta
 import random
 import uuid
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
+from django.db import IntegrityError
 from decimal import Decimal
-
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Position, MarketTick
+from .models import  MarketTick
 
-from .models import AuditEvent, DemoWallet, MarketTick, Position, SyntheticPayment, MarketCandle
+from .models import AuditEvent, Wallet, MarketTick, MarketCandle, WalletTransaction, IdempotencyRequest
 
 logger = logging.getLogger("fraudlab")
 
+IDEMPOTENCY_KEY_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]{16,64}$"
+)
+
+
+class IdempotencyError(Exception):
+    pass
+
+
+class IdempotencyConflict(IdempotencyError):
+    pass
+
+
+def validate_idempotency_key(key):
+
+    if not key:
+        raise IdempotencyError(
+            "Idempotency-Key header is required."
+        )
+
+    if not isinstance(key, str):
+        raise IdempotencyError(
+            "Invalid idempotency key."
+        )
+
+    key = key.strip()
+
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+        raise IdempotencyError(
+            "Invalid idempotency key format."
+        )
+
+    return key
+
+def create_request_hash(payload):
+    """
+    Creates a deterministic SHA-256 hash of the
+    financial request payload.
+    """
+
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    return hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+
+
+def get_existing_request(
+    user,
+    operation,
+    key,
+):
+
+    return (
+        IdempotencyRequest.objects
+        .select_related("transaction")
+        .filter(
+            user=user,
+            operation=operation,
+            key=key,
+        )
+        .first()
+    )
 
 def audit(event_type, message, user=None, severity="INFO", metadata=None, ip_address=None):
     event = AuditEvent.objects.create(
@@ -40,13 +110,16 @@ def generate_market_tick():
     base = latest.price if latest else Decimal("5")
 
     movement = Decimal(
-        str(random.uniform(-0.0013, 0.0013))
+    str(
+        random.gauss(0, 0.0001)
+        + random.uniform(-0.0003, 0.0004)
+    )
     )
 
     price = (
         base * (Decimal("1") + movement)
     ).quantize(
-        Decimal("0.00000001")
+        Decimal("0.00001")
     )
 
     tick = MarketTick.objects.create(
@@ -135,145 +208,279 @@ def get_latest_market_price(symbol="BTCUSDT"):
     return tick.price
 
 
+def get_latest_market_tick(symbol="BTCUSDT"):
+    """
+    Single server-authoritative source for the latest market price.
+    """
 
-@transaction.atomic
-def synthetic_deposit(user, provider, amount, asset):
-    amount = Decimal(str(amount))
-    if amount <= 0:
-        raise ValueError("Amount must be positive.")
-
-    reference = f"SIM-{uuid.uuid4().hex[:14].upper()}"
-
-    payment = SyntheticPayment.objects.create(
-        user=user,
-        provider=provider,
-        direction="DEPOSIT",
-        amount=amount,
-        asset=asset,
-        reference=reference,
-        metadata={"synthetic": True},
+    return (
+        MarketTick.objects
+        .filter(symbol=symbol)
+        .order_by("-created_at", "-id")
+        .first()
     )
 
-    wallet, _ = DemoWallet.objects.get_or_create(
-        user=user,
-        asset=asset,
-        defaults={"address": f"demo_{uuid.uuid4().hex}"},
-    )
-    wallet.balance += amount
-    wallet.save(update_fields=["balance"])
 
-    audit(
-        "SYNTHETIC_DEPOSIT",
-        f"{provider} synthetic deposit credited: {amount} {asset}",
-        user=user,
-        metadata={"reference": reference, "synthetic": True},
-    )
-    return payment
+def withdraw_au(
+    user,
+    au_amount,
+    idempotency_key,
+):
 
-
-@transaction.atomic
-def synthetic_withdrawal(user, provider, amount, asset):
-    amount = Decimal(str(amount))
-    if amount <= 0:
-        raise ValueError("Amount must be positive.")
-
-    wallet = DemoWallet.objects.filter(user=user, asset=asset).first()
-    if not wallet or wallet.balance < amount:
-        raise ValueError("Insufficient synthetic balance.")
-
-    wallet.balance -= amount
-    wallet.save(update_fields=["balance"])
-
-    reference = f"SIM-WD-{uuid.uuid4().hex[:12].upper()}"
-
-    payment = SyntheticPayment.objects.create(
-        user=user,
-        provider=provider,
-        direction="WITHDRAWAL",
-        amount=amount,
-        asset=asset,
-        reference=reference,
-        metadata={"synthetic": True},
+    au_amount = Decimal(
+        str(au_amount)
     )
 
-    audit(
-        "SYNTHETIC_WITHDRAWAL",
-        f"{provider} synthetic withdrawal: {amount} {asset}",
-        user=user,
-        metadata={"reference": reference, "synthetic": True},
+    if au_amount <= Decimal("0"):
+
+        raise ValueError(
+            "Withdrawal amount must be greater than zero."
+        )
+
+    request_payload = {
+        "au_amount": str(au_amount),
+    }
+
+    request_hash = create_request_hash(
+        request_payload
     )
-    return payment
 
+    # ----------------------------------------------
+    # Existing request?
+    # ----------------------------------------------
 
-
-def synthetic_convert_kes_to_usdt(user, kes_amount, rate=Decimal("130")):
-    """Convert synthetic KES into synthetic USDT inside the lab only."""
-    kes_amount = Decimal(str(kes_amount))
-    rate = Decimal(str(rate))
-
-    if kes_amount <= 0 or rate <= 0:
-        raise ValueError("Amount and rate must be positive.")
-
-    kes_wallet = DemoWallet.objects.filter(
+    existing = get_existing_request(
         user=user,
-        asset="KES"
-    ).first()
+        operation="WITHDRAWAL",
+        key=idempotency_key,
+    )
 
-    if not kes_wallet or kes_wallet.balance < kes_amount:
-        raise ValueError("Insufficient synthetic KES balance.")
+    if existing:
 
-    usdt_amount = (
-        kes_amount / rate
-    ).quantize(Decimal("0.00000001"))
+        if existing.request_hash != request_hash:
 
-    from .models import SyntheticConversion
-    import uuid
+            raise ValueError(
+                "This idempotency key was already "
+                "used with different request data."
+            )
+
+        if existing.transaction:
+
+            return existing.transaction
+
+        raise ValueError(
+            "This request is currently being processed."
+        )
+
+    # ----------------------------------------------
+    # Server-authoritative price
+    # ----------------------------------------------
+
+    price = get_latest_market_price()
+
+    ksh_amount = (
+        au_amount * price
+    ).quantize(
+        Decimal("0.01")
+    )
+
+    transaction_id = uuid.uuid4().hex.upper()
+
+    # ----------------------------------------------
+    # Atomic operation
+    # ----------------------------------------------
 
     with transaction.atomic():
 
-        kes_wallet.balance -= kes_amount
-        kes_wallet.save(update_fields=["balance"])
+        try:
 
-        usdt_wallet, _ = DemoWallet.objects.get_or_create(
+            idempotency = (
+                IdempotencyRequest.objects
+                .create(
+                    user=user,
+                    operation="WITHDRAWAL",
+                    key=idempotency_key,
+                    request_hash=request_hash,
+                )
+            )
+
+        except IntegrityError:
+
+            existing = (
+                IdempotencyRequest.objects
+                .select_related("transaction")
+                .get(
+                    user=user,
+                    operation="WITHDRAWAL",
+                    key=idempotency_key,
+                )
+            )
+
+            if existing.request_hash != request_hash:
+
+                raise ValueError(
+                    "This idempotency key was already "
+                    "used with different request data."
+                )
+
+            if existing.transaction:
+
+                return existing.transaction
+
+            raise ValueError(
+                "This request is currently being processed."
+            )
+
+        # ------------------------------------------
+        # Lock wallet
+        # ------------------------------------------
+
+        wallet = (
+            Wallet.objects
+            .select_for_update()
+            .get(user=user)
+        )
+
+        # ------------------------------------------
+        # Balance validation
+        # ------------------------------------------
+
+        if wallet.au_balance < au_amount:
+
+            raise ValueError(
+                "Insufficient AU balance."
+            )
+
+        # ------------------------------------------
+        # Debit wallet
+        # ------------------------------------------
+
+        wallet.au_balance -= au_amount
+
+        wallet.save(
+            update_fields=[
+                "au_balance",
+                "updated_at",
+            ]
+        )
+
+        # ------------------------------------------
+        # Create withdrawal transaction
+        # ------------------------------------------
+
+        ledger = WalletTransaction.objects.create(
+            transaction_id=transaction_id,
+
             user=user,
-            asset="USDT",
-            defaults={
-                "address": f"demo_usdt_wallet_{uuid.uuid4().hex[:12]}"
-            },
+
+            transaction_type="WITHDRAWAL",
+
+            status="COMPLETED",
+
+            au_amount=au_amount,
+
+            ksh_amount=ksh_amount,
+
+            price_per_au=price,
+
+            reference=(
+                f"MPESA-PAYOUT-"
+                f"{uuid.uuid4().hex[:12].upper()}"
+            ),
         )
 
-        usdt_wallet.balance += usdt_amount
-        usdt_wallet.save(update_fields=["balance"])
+        # ------------------------------------------
+        # Link idempotency record
+        # ------------------------------------------
 
-        reference = (
-            f"SIM-FX-{uuid.uuid4().hex[:12].upper()}"
+        idempotency.transaction = ledger
+
+        idempotency.save(
+            update_fields=[
+                "transaction",
+            ]
         )
 
-        conversion = SyntheticConversion.objects.create(
-            user=user,
-            from_asset="KES",
-            to_asset="USDT",
-            from_amount=kes_amount,
-            to_amount=usdt_amount,
-            rate=rate,
-            reference=reference,
+    return ledger
+
+
+
+
+def update_market_candle(tick):
+    """
+    Add a MarketTick to its corresponding 1-minute candle.
+
+    The candle is created when the first tick arrives.
+    Subsequent ticks update high, low and close.
+    """
+
+    bucket_start = tick.created_at.replace(
+        second=0,
+        microsecond=0,
+    )
+
+    candle, created = MarketCandle.objects.get_or_create(
+        symbol=tick.symbol,
+        timeframe="1m",
+        bucket_start=bucket_start,
+        defaults={
+            "open": tick.price,
+            "high": tick.price,
+            "low": tick.price,
+            "close": tick.price,
+            "tick_count": 1,
+        },
+    )
+
+    if not created:
+        candle.high = max(candle.high, tick.price)
+        candle.low = min(candle.low, tick.price)
+        candle.close = tick.price
+        candle.tick_count += 1
+        candle.save(
+            update_fields=[
+                "high",
+                "low",
+                "close",
+                "tick_count",
+                "updated_at",
+            ]
         )
 
-        audit(
-            "SYNTHETIC_CONVERSION",
-            f"Converted {kes_amount} KES to "
-            f"{usdt_amount} USDT at synthetic rate {rate}.",
-            user=user,
-            metadata={
-                "reference": reference,
-                "synthetic": True,
-                "from_asset": "KES",
-                "to_asset": "USDT",
-                "rate": str(rate),
-            },
+    return candle
+
+def get_latest_market_tick(symbol="BTCUSDT"):
+    """
+    Return the most recent persisted market tick.
+
+    This is the single source of truth for:
+    - chart updates
+    - opening trades
+    - closing trades
+    """
+
+    return (
+        MarketTick.objects
+        .filter(symbol=symbol)
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+def get_latest_market_price(symbol="BTCUSDT"):
+    """
+    Return the latest persisted market price.
+    """
+
+    tick = get_latest_market_tick(symbol)
+
+    if tick is None:
+        raise ValueError(
+            f"No market tick available for {symbol}"
         )
 
-    return conversion
+    return tick.price
+
 
 def get_latest_market_tick(symbol="BTCUSDT"):
     """
@@ -288,111 +495,175 @@ def get_latest_market_tick(symbol="BTCUSDT"):
     )
 
 
-@transaction.atomic
-def open_position(
+
+def purchase_au(
     user,
-    quantity,
-    side,
-    symbol="BTCUSDT"
+    ksh_amount,
+    idempotency_key,
 ):
-    """
-    Open a position using the latest persisted MarketTick.
 
-    The browser NEVER supplies the entry price.
-    """
+    ksh_amount = Decimal(str(ksh_amount))
 
-    quantity = Decimal(str(quantity))
-
-    side = side.upper()
-
-    if quantity <= 0:
-        raise ValueError("Quantity must be greater than zero.")
-
-    if side not in ("LONG", "SHORT"):
-        raise ValueError("Invalid trade side.")
-
-    # Prevent multiple simultaneous open positions
-    existing = (
-        Position.objects
-        .select_for_update()
-        .filter(
-            user=user,
-            status="OPEN"
+    if ksh_amount <= Decimal("0"):
+        raise ValueError(
+            "Purchase amount must be greater than zero."
         )
-        .first()
+
+    request_payload = {
+        "amount": str(ksh_amount),
+    }
+
+    request_hash = create_request_hash(
+        request_payload
+    )
+
+    # --------------------------------------------------
+    # Check whether this request was already processed
+    # --------------------------------------------------
+
+    existing = get_existing_request(
+        user=user,
+        operation="PURCHASE",
+        key=idempotency_key,
     )
 
     if existing:
+
+        if existing.request_hash != request_hash:
+
+            raise ValueError(
+                "This idempotency key was already used "
+                "with different request data."
+            )
+
+        if existing.transaction:
+
+            return existing.transaction
+
         raise ValueError(
-            "You already have an open position."
+            "This request is currently being processed."
         )
 
-    # SERVER AUTHORITATIVE PRICE
-    tick = get_latest_market_tick(symbol)
+    # --------------------------------------------------
+    # Obtain server-authoritative market price
+    # --------------------------------------------------
 
-    if tick is None:
-        raise ValueError(
-            f"No market price available for {symbol}."
-        )
+    price = get_latest_market_price()
 
-    position = Position.objects.create(
-        user=user,
-        symbol=symbol,
-        side=side,
-        quantity=quantity,
-        entry_price=tick.price,
-        status="OPEN"
+    au_amount = (
+        ksh_amount / price
+    ).quantize(
+        Decimal("0.00000001")
     )
 
-    return position, tick
+    transaction_id = uuid.uuid4().hex.upper()
 
+    # --------------------------------------------------
+    # Atomic financial operation
+    # --------------------------------------------------
 
-@transaction.atomic
-def close_position(
-    user,
-    symbol="BTCUSDT"
-):
-    """
-    Close the user's active position using
-    the latest persisted MarketTick.
+    with transaction.atomic():
 
-    The browser NEVER supplies the exit price.
-    """
+        try:
 
-    position = (
-        Position.objects
-        .select_for_update()
-        .filter(
+            idempotency = (
+                IdempotencyRequest.objects
+                .create(
+                    user=user,
+                    operation="PURCHASE",
+                    key=idempotency_key,
+                    request_hash=request_hash,
+                )
+            )
+
+        except IntegrityError:
+
+            # Another request with this key won
+            # the race condition.
+
+            existing = (
+                IdempotencyRequest.objects
+                .select_related("transaction")
+                .get(
+                    user=user,
+                    operation="PURCHASE",
+                    key=idempotency_key,
+                )
+            )
+
+            if existing.request_hash != request_hash:
+
+                raise ValueError(
+                    "This idempotency key was already "
+                    "used with different request data."
+                )
+
+            if existing.transaction:
+
+                return existing.transaction
+
+            raise ValueError(
+                "This request is currently being processed."
+            )
+
+        # ----------------------------------------------
+        # Lock the wallet
+        # ----------------------------------------------
+
+        wallet = (
+            Wallet.objects
+            .select_for_update()
+            .get(user=user)
+        )
+
+        # ----------------------------------------------
+        # Create financial transaction
+        # ----------------------------------------------
+
+        ledger = WalletTransaction.objects.create(
+            transaction_id=transaction_id,
+
             user=user,
-            symbol=symbol,
-            status="OPEN"
-        )
-        .first()
-    )
 
-    if position is None:
-        raise ValueError(
-            "No open position found."
-        )
+            transaction_type="PURCHASE",
 
-    # SERVER AUTHORITATIVE EXIT PRICE
-    tick = get_latest_market_tick(symbol)
+            status="COMPLETED",
 
-    if tick is None:
-        raise ValueError(
-            f"No market price available for {symbol}."
+            au_amount=au_amount,
+
+            ksh_amount=ksh_amount,
+
+            price_per_au=price,
+
+            reference=(
+                f"MPESA-"
+                f"{uuid.uuid4().hex[:12].upper()}"
+            ),
         )
 
-    position.exit_price = tick.price
-    position.closed_at = tick.created_at
-    position.status = "CLOSED"
+        # ----------------------------------------------
+        # Credit wallet
+        # ----------------------------------------------
 
-    position.save(
-        update_fields=[
-            "exit_price",
-            "closed_at",
-            "status",
-        ]
-    )
+        wallet.au_balance += au_amount
 
-    return position, tick
+        wallet.save(
+            update_fields=[
+                "au_balance",
+                "updated_at",
+            ]
+        )
+
+        # ----------------------------------------------
+        # Link request to transaction
+        # ----------------------------------------------
+
+        idempotency.transaction = ledger
+
+        idempotency.save(
+            update_fields=[
+                "transaction",
+            ]
+        )
+
+    return ledger

@@ -1,22 +1,756 @@
 from decimal import Decimal, InvalidOperation
-
+import json
+import uuid
+import hashlib
+from django.db import transaction
+from django.db import IntegrityError
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.models import User
+from django.contrib.auth.decorators import login_required
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
-
-from .models import AuditEvent, DemoWallet, MarketTick, Position, SyntheticPayment, MarketCandle
+from django.contrib.auth import login
+from django.contrib.auth.forms import UserCreationForm
+from django.shortcuts import render, redirect
+from .models import AuditEvent, Wallet, MarketTick, MarketCandle, WalletTransaction, IdempotencyRequest 
 from .services import (
     audit,
     generate_market_tick,
-    open_position,
-    synthetic_deposit,
-    synthetic_withdrawal,
-    synthetic_convert_kes_to_usdt,
+    purchase_au,
+    get_latest_market_price,
+    withdraw_au,
+    validate_idempotency_key,
+    IdempotencyError,
+
 )
-from .services import (
-    open_position, close_position, get_latest_market_tick,)
+from .services import (get_latest_market_price)
+
+def register(request):
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+
+    if request.method == "POST":
+        form = UserCreationForm(request.POST)
+
+        if form.is_valid():
+            user = form.save()
+
+            # Automatically log the user in.
+            login(request, user)
+
+            return redirect("dashboard")
+
+    else:
+        form = UserCreationForm()
+
+    return render(
+        request,
+        "register.html",
+        {
+            "form": form,
+        },
+    )
+@login_required
+@require_POST
+def purchase_au(request):
+
+    # ---------------------------------------------------------
+    # 1. READ IDEMPOTENCY KEY
+    # ---------------------------------------------------------
+
+    idempotency_key = request.headers.get(
+        "Idempotency-Key"
+    )
+
+    if not idempotency_key:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Missing Idempotency-Key."
+            },
+            status=400,
+        )
+
+    idempotency_key = idempotency_key.strip()
+
+    if not idempotency_key:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Invalid Idempotency-Key."
+            },
+            status=400,
+        )
+
+    if len(idempotency_key) > 64:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Idempotency-Key is too long."
+            },
+            status=400,
+        )
+
+    # ---------------------------------------------------------
+    # 2. READ REQUEST
+    # ---------------------------------------------------------
+
+    amount_raw = request.POST.get("amount")
+
+    if not amount_raw:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Purchase amount is required."
+            },
+            status=400,
+        )
+
+    try:
+        ksh_amount = Decimal(amount_raw)
+
+    except InvalidOperation:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Invalid purchase amount."
+            },
+            status=400,
+        )
+
+    if ksh_amount <= Decimal("0"):
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Purchase amount must be greater than zero."
+            },
+            status=400,
+        )
+
+    ksh_amount = ksh_amount.quantize(
+        Decimal("0.01")
+    )
+
+    # ---------------------------------------------------------
+    # 3. CREATE REQUEST HASH
+    # ---------------------------------------------------------
+
+    request_payload = {
+        "amount": str(ksh_amount),
+    }
+
+    request_hash = hashlib.sha256(
+        json.dumps(
+            request_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    # ---------------------------------------------------------
+    # 4. IDEMPOTENCY CHECK
+    # ---------------------------------------------------------
+
+    existing = (
+        IdempotencyRequest.objects
+        .select_related("transaction")
+        .filter(
+            user=request.user,
+            operation="PURCHASE",
+            key=idempotency_key,
+        )
+        .first()
+    )
+
+    if existing:
+
+        # Same key + different request = reject.
+        if existing.request_hash != request_hash:
+
+            return JsonResponse(
+                {
+                    "success": False,
+                    "error": (
+                        "This Idempotency-Key has already "
+                        "been used with different request data."
+                    ),
+                },
+                status=409,
+            )
+
+        # Same request being retried.
+        if existing.transaction:
+
+            tx = existing.transaction
+
+            return JsonResponse(
+                {
+                    "success": True,
+                    "idempotent_replay": True,
+
+                    "execution_price": str(
+                        tx.price_per_au
+                    ),
+
+                    "au_credited": str(
+                        tx.au_amount
+                    ),
+
+                    "amount_paid": str(
+                        tx.ksh_amount
+                    ),
+
+                    "payment_verified": (
+                        tx.status == "COMPLETED"
+                    ),
+
+                    "transaction_reference": (
+                        tx.transaction_id
+                    ),
+
+                    "wallet_balance": str(
+                        request.user.wallet.au_balance
+                    ),
+                }
+            )
+
+    # ---------------------------------------------------------
+    # 5. PROCESS PURCHASE ATOMICALLY
+    # ---------------------------------------------------------
+
+    try:
+
+        with transaction.atomic():
+
+            # Lock wallet so two purchases cannot
+            # modify it simultaneously.
+
+            wallet = (
+                Wallet.objects
+                .select_for_update()
+                .get(user=request.user)
+            )
+
+            # -------------------------------------------------
+            # AUTHORITATIVE MARKET PRICE
+            # -------------------------------------------------
+
+            execution_price = get_latest_market_price(
+                "BTCUSDT"
+            )
+
+            execution_price = Decimal(
+                execution_price
+            )
+
+            if execution_price <= Decimal("0"):
+                raise ValueError(
+                    "Invalid market price."
+                )
+
+            # -------------------------------------------------
+            # SIMULATED M-PESA VERIFICATION
+            # -------------------------------------------------
+
+            payment_verified = True
+
+            if not payment_verified:
+                raise ValueError(
+                    "M-Pesa payment could not be verified."
+                )
+
+            # -------------------------------------------------
+            # CALCULATE AU
+            # -------------------------------------------------
+
+            au_amount = (
+                ksh_amount / execution_price
+            ).quantize(
+                Decimal("0.00000001")
+            )
+
+            if au_amount <= Decimal("0"):
+                raise ValueError(
+                    "Calculated AU amount is invalid."
+                )
+
+            # -------------------------------------------------
+            # TRANSACTION ID
+            # -------------------------------------------------
+
+            transaction_id = (
+                f"AU-{uuid.uuid4().hex.upper()}"
+            )
+
+            # -------------------------------------------------
+            # CREDIT WALLET
+            # -------------------------------------------------
+
+            wallet.au_balance += au_amount
+
+            wallet.save(
+                update_fields=[
+                    "au_balance",
+                    "updated_at",
+                ]
+            )
+
+            # -------------------------------------------------
+            # CREATE LEDGER TRANSACTION
+            # -------------------------------------------------
+
+            wallet_transaction = (
+                WalletTransaction.objects.create(
+                    transaction_id=transaction_id,
+
+                    user=request.user,
+
+                    transaction_type="PURCHASE",
+
+                    status="COMPLETED",
+
+                    au_amount=au_amount,
+
+                    ksh_amount=ksh_amount,
+
+                    price_per_au=execution_price,
+
+                    reference=(
+                        f"MPESA-{uuid.uuid4().hex[:12].upper()}"
+                    ),
+                )
+            )
+
+            # -------------------------------------------------
+            # CREATE IDEMPOTENCY RECORD
+            # -------------------------------------------------
+
+            IdempotencyRequest.objects.create(
+                user=request.user,
+
+                operation="PURCHASE",
+
+                key=idempotency_key,
+
+                request_hash=request_hash,
+
+                transaction=wallet_transaction,
+            )
+
+        # -----------------------------------------------------
+        # 6. SUCCESS RESPONSE
+        # -----------------------------------------------------
+
+        return JsonResponse(
+            {
+                "success": True,
+
+                "idempotent_replay": False,
+
+                "execution_price": str(
+                    execution_price
+                ),
+
+                "au_credited": str(
+                    au_amount
+                ),
+
+                "amount_paid": str(
+                    ksh_amount
+                ),
+
+                "payment_verified": True,
+
+                "transaction_reference": (
+                    wallet_transaction.transaction_id
+                ),
+
+                "payment_reference": (
+                    wallet_transaction.reference
+                ),
+
+                "wallet_balance": str(
+                    wallet.au_balance
+                ),
+            }
+        )
+
+    except Wallet.DoesNotExist:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Wallet not found."
+            },
+            status=400,
+        )
+
+    except IntegrityError:
+
+        # Another request with the same key may have
+        # committed first.
+
+        existing = (
+            IdempotencyRequest.objects
+            .select_related("transaction")
+            .filter(
+                user=request.user,
+                operation="PURCHASE",
+                key=idempotency_key,
+            )
+            .first()
+        )
+
+        if existing and existing.transaction:
+
+            tx = existing.transaction
+
+            return JsonResponse(
+                {
+                    "success": True,
+                    "idempotent_replay": True,
+
+                    "execution_price": str(
+                        tx.price_per_au
+                    ),
+
+                    "au_credited": str(
+                        tx.au_amount
+                    ),
+
+                    "amount_paid": str(
+                        tx.ksh_amount
+                    ),
+
+                    "payment_verified": (
+                        tx.status == "COMPLETED"
+                    ),
+
+                    "transaction_reference": (
+                        tx.transaction_id
+                    ),
+
+                    "wallet_balance": str(
+                        request.user.wallet.au_balance
+                    ),
+                }
+            )
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Purchase could not be completed."
+            },
+            status=409,
+        )
+
+    except Exception as exc:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": str(exc),
+            },
+            status=400,
+        )
+
+@login_required
+def portfolio_api(request):
+
+    wallet = request.user.wallet
+
+    price = get_latest_market_price()
+
+    au_balance = wallet.au_balance
+
+    current_value = (
+        au_balance * price
+    ).quantize(
+        Decimal("0.01")
+    )
+
+    purchases = WalletTransaction.objects.filter(
+        user=request.user,
+        transaction_type="PURCHASE",
+        status="COMPLETED",
+    )
+
+    invested = sum(
+        (
+            tx.ksh_amount
+            for tx in purchases
+        ),
+        Decimal("0"),
+    )
+
+    gain_loss = (
+        current_value - invested
+    )
+
+    if invested > 0:
+
+        gain_loss_percent = (
+            gain_loss / invested
+        ) * Decimal("100")
+
+    else:
+
+        gain_loss_percent = Decimal("0")
+
+    return JsonResponse(
+        {
+            "au_balance": format(
+                au_balance,
+                ".2f"
+            ),
+
+            "price": str(price),
+
+            "current_value": str(
+                current_value
+            ),
+
+            "invested": str(
+                invested
+            ),
+
+            "gain_loss": str(
+                gain_loss.quantize(
+                    Decimal("0.01")
+                )
+            ),
+
+            "gain_loss_percent": str(
+                gain_loss_percent.quantize(
+                    Decimal("0.01")
+                )
+            ),
+        }
+    )
+
+@login_required
+@require_POST
+def withdrawal_api(request):
+
+    raw_key = request.headers.get(
+        "Idempotency-Key"
+    )
+
+    try:
+
+        idempotency_key = (
+            validate_idempotency_key(raw_key)
+        )
+
+    except IdempotencyError as exc:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": str(exc),
+            },
+            status=400,
+        )
+
+    try:
+
+        data = json.loads(
+            request.body
+        )
+
+    except json.JSONDecodeError:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "Invalid JSON.",
+            },
+            status=400,
+        )
+
+    au_amount = data.get(
+        "au_amount"
+    )
+
+    if au_amount is None:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "AU amount is required.",
+            },
+            status=400,
+        )
+
+    try:
+
+        ledger = withdraw_au(
+            user=request.user,
+            au_amount=au_amount,
+            idempotency_key=idempotency_key,
+        )
+
+    except ValueError as exc:
+
+        return JsonResponse(
+            {
+                "success": False,
+                "error": str(exc),
+            },
+            status=400,
+        )
+
+    return JsonResponse(
+        {
+            "success": True,
+
+            "transaction_id":
+                ledger.transaction_id,
+
+            "au_amount":
+                str(ledger.au_amount),
+
+            "ksh_amount":
+                str(ledger.ksh_amount),
+
+            "price":
+                str(ledger.price_per_au),
+
+            "reference":
+                ledger.reference,
+        }
+    )
+
+
+@login_required
+def withdrawal_estimate(request):
+    latest_tick = (
+        MarketTick.objects
+        .filter(symbol="BTCUSDT")
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+    if not latest_tick:
+        return JsonResponse({
+            "price": "0.00",
+            "payout": "0.00",
+        })
+
+    price = latest_tick.price
+
+    amount = Decimal(
+        request.GET.get("amount", "0")
+    )
+
+    payout = amount * price
+
+    return JsonResponse({
+        "price": str(price),
+        "payout": str(
+            payout.quantize(Decimal("0.01"))
+        ),
+    })
+    
+def register_view(request):
+
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+
+    if request.method == "POST":
+
+        username = request.POST.get("username", "").strip()
+        email = request.POST.get("email", "").strip()
+        password = request.POST.get("password", "")
+
+        if not username or not password:
+            return render(
+                request,
+                "register.html",
+                {
+                    "error": "Username and password are required."
+                },
+            )
+
+        if User.objects.filter(username=username).exists():
+            return render(
+                request,
+                "register.html",
+                {
+                    "error": "Username already exists."
+                },
+            )
+
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+        )
+
+        login(request, user)
+
+        return redirect("dashboard")
+
+    return render(request, "register.html")
+
+def login_view(request):
+
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+
+    if request.method == "POST":
+
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
+
+        user = authenticate(
+            request,
+            username=username,
+            password=password,
+        )
+
+        if user is not None:
+
+            login(request, user)
+
+            return redirect("dashboard")
+
+        return render(
+            request,
+            "login.html",
+            {
+                "error": "Invalid username or password."
+            },
+        )
+
+    return render(request, "login.html")
+
+
+# @require_POST
+# def login_view(request):
+#     username = request.POST.get("username", "")
+#     password = request.POST.get("password", "")
+#     user = authenticate(request, username=username, password=password)
+
+#     if user is None:
+#         audit("LOGIN_FAILURE", f"Failed synthetic login for username={username}", severity="WARN")
+#         return render(request, "login.html", {"error": "Invalid demo credentials."})
+
+#     login(request, user)
+#     audit("LOGIN_SUCCESS", "Synthetic demo login", user=user)
+#     return redirect("dashboard")
+
+
+@require_POST
+def logout_view(request):
+
+    logout(request)
+
+    return redirect("login")
+
 def market_candles(request):
     symbol = request.GET.get("symbol", "BTCUSDT")
     limit = min(
@@ -81,40 +815,21 @@ def home(request):
     return render(request, "login.html")
 
 
-@require_POST
-def login_view(request):
-    username = request.POST.get("username", "")
-    password = request.POST.get("password", "")
-    user = authenticate(request, username=username, password=password)
-
-    if user is None:
-        audit("LOGIN_FAILURE", f"Failed synthetic login for username={username}", severity="WARN")
-        return render(request, "login.html", {"error": "Invalid demo credentials."})
-
-    login(request, user)
-    audit("LOGIN_SUCCESS", "Synthetic demo login", user=user)
-    return redirect("dashboard")
-
-
-def logout_view(request):
-    if request.user.is_authenticated:
-        audit("LOGOUT", "Synthetic demo logout", user=request.user)
-    logout(request)
-    return redirect("home")
-
-
 @login_required
 def dashboard(request):
-    wallet = DemoWallet.objects.filter(user=request.user, asset="USDT").first()
-    latest = MarketTick.objects.filter(symbol="BTCUSDT").first()
-    positions = Position.objects.filter(user=request.user, status="OPEN")
-    payments = SyntheticPayment.objects.filter(user=request.user)[:10]
-    return render(request, "dashboard.html", {
-        "wallet": wallet,
-        "latest": latest,
-        "positions": positions,
-        "payments": payments,
-    })
+
+    wallet, created = Wallet.objects.get_or_create(
+        user=request.user)
+
+    return render(
+        request,
+        "dashboard.html",
+        {
+            "wallet": wallet,
+        },
+    )
+
+
 
 
 @login_required
@@ -140,281 +855,6 @@ def market_api(request):
 
 
 @login_required
-@require_POST
-def deposit_api(request):
-    provider = request.POST.get("provider", "MPESA").upper()
-    asset = "KES" if provider == "MPESA" else "USDT"
-
-    try:
-        amount = Decimal(request.POST.get("amount", "0"))
-        payment = synthetic_deposit(request.user, provider, amount, asset)
-    except (InvalidOperation, ValueError) as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
-
-    return JsonResponse({
-        "synthetic": True,
-        "reference": payment.reference,
-        "provider": payment.provider,
-        "amount": str(payment.amount),
-        "asset": payment.asset,
-    })
-
-
-@login_required
-@require_POST
-def withdrawal_api(request):
-    provider = request.POST.get("provider", "MPESA").upper()
-    asset = "KES" if provider == "MPESA" else "USDT"
-
-    try:
-        amount = Decimal(request.POST.get("amount", "0"))
-        payment = synthetic_withdrawal(request.user, provider, amount, asset)
-    except (InvalidOperation, ValueError) as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
-
-    return JsonResponse({
-        "synthetic": True,
-        "reference": payment.reference,
-        "provider": payment.provider,
-        "amount": str(payment.amount),
-        "asset": payment.asset,
-    })
-
-@login_required
-@require_POST
-def convert_api(request):
-    try:
-        amount = Decimal(
-            request.POST.get("amount", "0")
-        )
-
-        conversion = synthetic_convert_kes_to_usdt(
-            request.user,
-            amount
-        )
-
-    except (InvalidOperation, ValueError) as exc:
-        return JsonResponse(
-            {"error": str(exc)},
-            status=400
-        )
-
-    return JsonResponse({
-        "synthetic": True,
-        "reference": conversion.reference,
-        "from_asset": conversion.from_asset,
-        "to_asset": conversion.to_asset,
-        "from_amount": str(conversion.from_amount),
-        "to_amount": str(conversion.to_amount),
-        "rate": str(conversion.rate),
-    })
-@login_required
-@require_http_methods(["GET", "POST", "DELETE"])
-def position_api(request):
-
-    # ==================================================
-    # GET CURRENT POSITION
-    # ==================================================
-
-    if request.method == "GET":
-
-        position = (
-            Position.objects
-            .filter(
-                user=request.user,
-                status="OPEN"
-            )
-            .first()
-        )
-
-        if position is None:
-            return JsonResponse({
-                "open": False,
-                "position": None,
-            })
-
-        tick = get_latest_market_tick(
-            position.symbol
-        )
-
-        current_price = (
-            tick.price
-            if tick
-            else position.entry_price
-        )
-
-        delta = (
-            current_price -
-            position.entry_price
-        )
-
-        if position.side == "SHORT":
-            delta = -delta
-
-        pnl = delta * position.quantity
-
-        pnl_percent = Decimal("0")
-
-        if position.entry_price > 0:
-            pnl_percent = (
-                pnl /
-                (
-                    position.entry_price *
-                    position.quantity
-                )
-            ) * Decimal("100")
-
-        return JsonResponse({
-            "open": True,
-
-            "position": {
-                "id": position.id,
-                "symbol": position.symbol,
-                "side": position.side,
-                "quantity": str(position.quantity),
-
-                "entry_price": str(
-                    position.entry_price
-                ),
-
-                "current_price": str(
-                    current_price
-                ),
-
-                "current_value": str(
-                    current_price *
-                    position.quantity
-                ),
-
-                "unrealized_pnl": str(
-                    pnl
-                ),
-
-                "pnl_percent": str(
-                    pnl_percent
-                ),
-
-                "opened_at": (
-                    position.opened_at.isoformat()
-                ),
-            }
-        })
-
-    # ==================================================
-    # OPEN POSITION
-    # ==================================================
-
-    if request.method == "POST":
-
-        try:
-
-            quantity = Decimal(
-                request.POST.get(
-                    "quantity",
-                    "0"
-                )
-            )
-
-            side = request.POST.get(
-                "side",
-                "LONG"
-            ).upper()
-
-            position, tick = open_position(
-                user=request.user,
-                quantity=quantity,
-                side=side,
-                symbol="BTCUSDT"
-            )
-
-        except (
-            InvalidOperation,
-            ValueError
-        ) as exc:
-
-            return JsonResponse(
-                {
-                    "success": False,
-                    "error": str(exc),
-                },
-                status=400
-            )
-
-        return JsonResponse({
-            "success": True,
-            "open": True,
-
-            "position": {
-                "id": position.id,
-                "symbol": position.symbol,
-                "side": position.side,
-                "quantity": str(position.quantity),
-
-                # SERVER PRICE
-                "entry_price": str(
-                    tick.price
-                ),
-
-                "opened_at": (
-                    position.opened_at.isoformat()
-                ),
-            }
-        })
-
-    # ==================================================
-    # CLOSE POSITION
-    # ==================================================
-
-    if request.method == "DELETE":
-
-        try:
-
-            position, tick = close_position(
-                user=request.user,
-                symbol="BTCUSDT"
-            )
-
-        except ValueError as exc:
-
-            return JsonResponse(
-                {
-                    "success": False,
-                    "error": str(exc),
-                },
-                status=400
-            )
-
-        return JsonResponse({
-            "success": True,
-            "open": False,
-
-            "position": {
-                "id": position.id,
-                "symbol": position.symbol,
-                "side": position.side,
-                "quantity": str(position.quantity),
-
-                "entry_price": str(
-                    position.entry_price
-                ),
-
-                # SERVER PRICE
-                "exit_price": str(
-                    position.exit_price
-                ),
-
-                "realized_pnl": str(
-                    position.realized_pnl
-                ),
-
-                "closed_at": (
-                    position.closed_at.isoformat()
-                ),
-            }
-        })
-
-
-@login_required
 @require_GET
 def events_api(request):
     events = AuditEvent.objects.filter(user=request.user)[:50]
@@ -429,3 +869,38 @@ def events_api(request):
             for e in events
         ]
     })
+
+
+@login_required
+def transaction_history_api(request):
+
+    transactions = (
+        WalletTransaction.objects
+        .filter(user=request.user)
+        .order_by("-created_at")
+    )
+
+    history = []
+
+    for tx in transactions:
+        history.append({
+            "date": tx.created_at.strftime("%d %b %Y %H:%M"),
+            "type": tx.get_transaction_type_display(),
+            "amount": f"{tx.ksh_amount:.2f}",
+            "au": f"{tx.au_amount:.8f}",
+            "price": f"{tx.price_per_au:.8f}",
+            "status": tx.status,
+            "reference": tx.reference or tx.transaction_id,
+        })
+
+    return JsonResponse({
+        "transactions": history
+    })
+
+
+def site_entry(request):
+
+    if request.user.is_authenticated:
+        logout(request)
+
+    return redirect("login")

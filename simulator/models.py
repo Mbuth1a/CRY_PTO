@@ -12,16 +12,159 @@ class DemoProfile(models.Model):
         return self.display_name
 
 
-class DemoWallet(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="wallets")
-    asset = models.CharField(max_length=20, default="USDT")
-    balance = models.DecimalField(max_digits=24, decimal_places=8, default=Decimal("0"))
-    address = models.CharField(max_length=100, unique=True)
+class Wallet(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="wallet",
+    )
+
+    au_balance = models.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        default=Decimal("0"),
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.address} / {self.asset}"
+        return f"{self.user.username} Wallet"
 
 
+class WalletTransaction(models.Model):
+
+    TYPE_CHOICES = [
+        ("PURCHASE", "Purchase"),
+        ("WITHDRAWAL", "Withdrawal"),
+        ("REFUND", "Refund"),
+    ]
+
+    STATUS_CHOICES = [
+        ("PENDING", "Pending"),
+        ("COMPLETED", "Completed"),
+        ("FAILED", "Failed"),
+    ]
+
+    transaction_id = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+    )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="wallet_transactions",
+    )
+
+    transaction_type = models.CharField(
+        max_length=20,
+        choices=TYPE_CHOICES,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="PENDING",
+    )
+
+    au_amount = models.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        default=Decimal("0"),
+    )
+
+    ksh_amount = models.DecimalField(
+        max_digits=24,
+        decimal_places=2,
+        default=Decimal("0"),
+    )
+
+    price_per_au = models.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        default=Decimal("0"),
+    )
+
+    reference = models.CharField(
+        max_length=100,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.transaction_id
+
+
+class IdempotencyRequest(models.Model):
+
+    OPERATION_CHOICES = [
+        ("PURCHASE", "Purchase"),
+        ("WITHDRAWAL", "Withdrawal"),
+    ]
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="idempotency_requests",
+    )
+
+    key = models.CharField(
+        max_length=64,
+    )
+
+    operation = models.CharField(
+        max_length=20,
+        choices=OPERATION_CHOICES,
+    )
+
+    request_hash = models.CharField(
+        max_length=64,
+    )
+
+    transaction = models.OneToOneField(
+        "WalletTransaction",
+        on_delete=models.PROTECT,
+        related_name="idempotency_request",
+        null=True,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    class Meta:
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "user",
+                    "operation",
+                    "key",
+                ],
+                name="unique_user_operation_idempotency_key",
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "user",
+                    "operation",
+                    "key",
+                ]
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.user.username} - "
+            f"{self.operation} - "
+            f"{self.key}"
+        )
 
 
 class MarketTick(models.Model):
@@ -83,175 +226,7 @@ class MarketCandle(models.Model):
     def __str__(self):
         return f"{self.symbol} {self.timeframe} {self.bucket_start}"
 
-class Position(models.Model):
-    SIDE_CHOICES = [
-        ("LONG", "LONG"),
-        ("SHORT", "SHORT"),
-    ]
 
-    STATUS_CHOICES = [
-        ("OPEN", "OPEN"),
-        ("CLOSED", "CLOSED"),
-    ]
-
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE
-    )
-
-    symbol = models.CharField(
-        max_length=20,
-        default="BTCUSDT"
-    )
-
-    side = models.CharField(
-        max_length=5,
-        choices=SIDE_CHOICES,
-        default="LONG"
-    )
-
-    quantity = models.DecimalField(
-        max_digits=24,
-        decimal_places=8
-    )
-
-    entry_price = models.DecimalField(
-        max_digits=24,
-        decimal_places=8
-    )
-
-    exit_price = models.DecimalField(
-        max_digits=24,
-        decimal_places=8,
-        null=True,
-        blank=True
-    )
-
-    opened_at = models.DateTimeField(
-        auto_now_add=True
-    )
-
-    closed_at = models.DateTimeField(
-        null=True,
-        blank=True
-    )
-
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default="OPEN"
-    )
-
-    @property
-    def unrealized_pnl(self):
-        """
-        Calculate current P&L using the latest persisted MarketTick.
-        """
-
-        if self.status != "OPEN":
-            return Decimal("0")
-
-        latest = (
-            MarketTick.objects
-            .filter(symbol=self.symbol)
-            .order_by("-created_at", "-id")
-            .first()
-        )
-
-        if not latest:
-            return Decimal("0")
-
-        delta = latest.price - self.entry_price
-
-        if self.side == "SHORT":
-            delta = -delta
-
-        return delta * self.quantity
-
-    @property
-    def realized_pnl(self):
-        """
-        Calculate P&L after the position has been closed.
-        """
-
-        if (
-            self.status != "CLOSED"
-            or self.exit_price is None
-        ):
-            return Decimal("0")
-
-        delta = self.exit_price - self.entry_price
-
-        if self.side == "SHORT":
-            delta = -delta
-
-        return delta * self.quantity
-
-    @property
-    def current_price(self):
-        """
-        Return the latest server-side market price.
-        """
-
-        latest = (
-            MarketTick.objects
-            .filter(symbol=self.symbol)
-            .order_by("-created_at", "-id")
-            .first()
-        )
-
-        return latest.price if latest else None
-
-    @property
-    def current_value(self):
-        """
-        Current notional value of the position.
-        """
-
-        price = self.current_price
-
-        if price is None:
-            return Decimal("0")
-
-        return price * self.quantity
-
-
-    
-class SyntheticPayment(models.Model):
-    PROVIDERS = [
-        ("MPESA", "Synthetic M-Pesa"),
-        ("BINANCE", "Synthetic Binance"),
-    ]
-    DIRECTIONS = [("DEPOSIT", "Deposit"), ("WITHDRAWAL", "Withdrawal")]
-    STATUSES = [("PENDING", "Pending"), ("COMPLETED", "Completed"), ("BLOCKED", "Blocked")]
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    provider = models.CharField(max_length=20, choices=PROVIDERS)
-    direction = models.CharField(max_length=20, choices=DIRECTIONS)
-    amount = models.DecimalField(max_digits=24, decimal_places=8)
-    asset = models.CharField(max_length=20, default="KES")
-    reference = models.CharField(max_length=80, unique=True)
-    status = models.CharField(max_length=20, choices=STATUSES, default="COMPLETED")
-    metadata = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-class SyntheticConversion(models.Model):
-    FROM_CHOICES = [
-        ("KES", "KES"),
-        ("USDT", "USDT"),
-    ]
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    from_asset = models.CharField(max_length=20, choices=FROM_CHOICES)
-    to_asset = models.CharField(max_length=20, choices=FROM_CHOICES)
-    from_amount = models.DecimalField(max_digits=24, decimal_places=8)
-    to_amount = models.DecimalField(max_digits=24, decimal_places=8)
-    rate = models.DecimalField(max_digits=24, decimal_places=8)
-    reference = models.CharField(max_length=80, unique=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
 
 
 class AuditEvent(models.Model):
