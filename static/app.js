@@ -12,7 +12,7 @@ let withdrawalAmountConfirmed = false;
 let confirmedWithdrawalAmount = null;
 let confirmedWithdrawalPrice = null;
 let confirmedWithdrawalPayout = null;
-
+let currentTimeframe = "1m";
 function addPricePoint(price) {
     const now = new Date();
 
@@ -39,77 +39,269 @@ function addPricePoint(price) {
     drawMarketChart();
 }
 
-function drawMarketChart() {
+
+function resizeMarketChart() {
     const canvas = document.getElementById("chart");
-    const ctx = canvas.getContext("2d");
 
-    const width = canvas.width;
-    const height = canvas.height;
-
-    ctx.clearRect(0, 0, width, height);
-
-    if (candleHistory.length === 0) {
-        ctx.fillStyle = "#666";
-        ctx.font = "14px Arial";
-        ctx.fillText("Waiting for market data...", 20, 30);
+    if (!canvas) {
         return;
     }
 
-    // --------------------------------------------------
-    // PRICE RANGE
-    // --------------------------------------------------
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
 
-    const prices = [];
+    const displayWidth = Math.max(1, Math.round(rect.width));
+    const displayHeight = Math.max(1, Math.round(rect.height));
 
-    candleHistory.forEach(candle => {
-        prices.push(
-            Number(candle.high),
-            Number(candle.low)
-        );
-    });
+    const requiredWidth =
+        Math.round(displayWidth * dpr);
 
-    let minPrice = Math.min(...prices);
-    let maxPrice = Math.max(...prices);
+    const requiredHeight =
+        Math.round(displayHeight * dpr);
 
-    // Prevent a completely flat chart
-    if (minPrice === maxPrice) {
-        minPrice -= 1;
-        maxPrice += 1;
+    /*
+     * Only resize the backing canvas when necessary.
+     * This avoids unnecessary clearing/rescaling.
+     */
+    if (
+        canvas.width !== requiredWidth ||
+        canvas.height !== requiredHeight
+    ) {
+        canvas.width = requiredWidth;
+        canvas.height = requiredHeight;
     }
 
-    // Add a little visual breathing room
-    const priceRange = maxPrice - minPrice;
+    const ctx = canvas.getContext("2d");
 
-    minPrice -= priceRange * 0.05;
-    maxPrice += priceRange * 0.05;
+    /*
+     * Draw using CSS-pixel coordinates while the
+     * backing canvas remains high-DPI.
+     */
+    ctx.setTransform(
+        dpr,
+        0,
+        0,
+        dpr,
+        0,
+        0
+    );
+}
+
+
+function drawMarketChart() {
+
+    const canvas =
+        document.getElementById("chart");
+
+    if (!canvas) {
+        return;
+    }
+
+    if (
+        !candleHistory ||
+        candleHistory.length === 0
+    ) {
+        resizeMarketChart();
+
+        const ctx =
+            canvas.getContext("2d");
+
+        const width =
+            canvas.clientWidth;
+
+        const height =
+            canvas.clientHeight;
+
+        ctx.clearRect(
+            0,
+            0,
+            width,
+            height
+        );
+
+        ctx.fillStyle = "#666";
+        ctx.font = "14px Arial";
+
+        ctx.fillText(
+            "Waiting for market data...",
+            20,
+            30
+        );
+
+        return;
+    }
+
+    resizeMarketChart();
+
+    const ctx =
+        canvas.getContext("2d");
+
+    /*
+     * IMPORTANT:
+     * Use CSS dimensions, not canvas.width/canvas.height.
+     */
+    const width =
+        canvas.clientWidth;
+
+    const height =
+        canvas.clientHeight;
+
+    ctx.clearRect(
+        0,
+        0,
+        width,
+        height
+    );
+
+
+    // --------------------------------------------------
+    // VISIBLE CANDLES
+    // --------------------------------------------------
+
+    const visibleCount =
+        currentTimeframe === "1m"
+            ? 60
+            : currentTimeframe === "5m"
+                ? 60
+                : currentTimeframe === "1h"
+                    ? 48
+                    : currentTimeframe === "4h"
+                        ? 42
+                        : 30;
+
+    const visibleHistory =
+        candleHistory.slice(-visibleCount);
+
+
+    if (visibleHistory.length === 0) {
+        return;
+    }
+
+
+            // --------------------------------------------------
+        // PRICE RANGE
+        // --------------------------------------------------
+
+        const prices = [];
+
+        visibleHistory.forEach(candle => {
+            const high = Number(candle.high);
+            const low = Number(candle.low);
+
+            if (
+                Number.isFinite(high) &&
+                Number.isFinite(low)
+            ) {
+                prices.push(high, low);
+            }
+        });
+
+        if (prices.length === 0) {
+            return;
+        }
+
+        let minPrice = Math.min(...prices);
+        let maxPrice = Math.max(...prices);
+
+        const actualRange =
+            maxPrice - minPrice;
+
+        const averagePrice =
+            (maxPrice + minPrice) / 2;
+
+        /*
+        * Keep the chart vertically responsive.
+        *
+        * Minimum visual range = 0.25% of price.
+        * This prevents very small movements from
+        * disappearing while avoiding a huge Y-axis range.
+        */
+        const minimumRange =
+            Math.max(
+                averagePrice * 0.000000025,
+                0.000001
+            );
+
+        /*
+        * Give the actual movement a little more
+        * vertical space.
+        */
+        const displayRange =
+            Math.max(
+                actualRange * 1.20,
+                minimumRange
+            );
+
+        const centerPrice =
+            averagePrice;
+
+        minPrice =
+            centerPrice -
+            displayRange / 2;
+
+        maxPrice =
+            centerPrice +
+            displayRange / 2;
+
+        /*
+        * Small breathing room around the candles.
+        */
+        const padding =
+            displayRange * 0.05;
+
+        minPrice -= padding;
+        maxPrice += padding;
+
 
     // --------------------------------------------------
     // CHART DIMENSIONS
     // --------------------------------------------------
 
     const paddingTop = 20;
-    const paddingRight = 60;
+    const paddingRight = 65;
     const paddingBottom = 30;
     const paddingLeft = 50;
 
     const chartWidth =
-        width - paddingLeft - paddingRight;
+        Math.max(
+            1,
+            width -
+                paddingLeft -
+                paddingRight
+        );
 
     const chartHeight =
-        height - paddingTop - paddingBottom;
+        Math.max(
+            1,
+            height -
+                paddingTop -
+                paddingBottom
+        );
+
+    // Left vertical chart boundary
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop);
+    ctx.lineTo(paddingLeft, height - paddingBottom);
+    ctx.strokeStyle = "#666";
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
     // --------------------------------------------------
-    // PRICE → CANVAS Y
+    // PRICE -> CANVAS Y
     // --------------------------------------------------
 
     function priceToY(price) {
+
         return (
             paddingTop +
-            ((maxPrice - price) /
-                (maxPrice - minPrice)) *
-                chartHeight
+            (
+                (maxPrice - price) /
+                (maxPrice - minPrice)
+            ) *
+            chartHeight
         );
     }
+
 
     // --------------------------------------------------
     // GRID
@@ -122,18 +314,30 @@ function drawMarketChart() {
     ctx.font = "11px Arial";
 
     for (let i = 0; i <= 4; i++) {
+
         const y =
             paddingTop +
             (chartHeight / 4) * i;
 
         ctx.beginPath();
-        ctx.moveTo(paddingLeft, y);
-        ctx.lineTo(width - paddingRight, y);
+
+        ctx.moveTo(
+            paddingLeft,
+            y
+        );
+
+        ctx.lineTo(
+            width - paddingRight,
+            y
+        );
+
         ctx.stroke();
 
         const value =
             maxPrice -
-            ((maxPrice - minPrice) / 4) * i;
+            (
+                (maxPrice - minPrice) / 4
+            ) * i;
 
         ctx.fillText(
             value.toFixed(2),
@@ -142,123 +346,180 @@ function drawMarketChart() {
         );
     }
 
+
     // --------------------------------------------------
-    // CANDLE WIDTH
+    // CANDLE SPACING
     // --------------------------------------------------
 
     const candleSpacing =
         chartWidth /
-        Math.max(candleHistory.length, 1);
+        visibleHistory.length;
 
+    /*
+     * Wider candles when fewer are visible.
+     */
     const candleWidth =
         Math.max(
-            3,
+            5,
             Math.min(
-                16,
-                candleSpacing * 0.65
+                18,
+                candleSpacing * 0.72
             )
         );
+
 
     // --------------------------------------------------
     // DRAW CANDLES
     // --------------------------------------------------
 
-    candleHistory.forEach((candle, index) => {
+    visibleHistory.forEach(
+        (candle, index) => {
 
-        const open = Number(candle.open);
-        const high = Number(candle.high);
-        const low = Number(candle.low);
-        const close = Number(candle.close);
+            const open =
+                Number(candle.open);
 
-        const x =
-            paddingLeft +
-            candleSpacing * index +
-            candleSpacing / 2;
+            const high =
+                Number(candle.high);
 
-        const highY = priceToY(high);
-        const lowY = priceToY(low);
-        const openY = priceToY(open);
-        const closeY = priceToY(close);
+            const low =
+                Number(candle.low);
 
-        // ----------------------------------------------
-        // Determine candle direction
-        // ----------------------------------------------
+            const close =
+                Number(candle.close);
 
-        const bullish = close >= open;
+            if (
+                !Number.isFinite(open) ||
+                !Number.isFinite(high) ||
+                !Number.isFinite(low) ||
+                !Number.isFinite(close)
+            ) {
+                return;
+            }
 
-        // ----------------------------------------------
-        // Wick
-        // ----------------------------------------------
+            const x =
+                paddingLeft +
+                (
+                    candleSpacing * index
+                ) +
+                candleSpacing / 2;
 
-        ctx.beginPath();
+            const highY =
+                priceToY(high);
 
-        ctx.moveTo(x, highY);
-        ctx.lineTo(x, lowY);
+            const lowY =
+                priceToY(low);
 
-        ctx.strokeStyle =
-            bullish
-                ? "#2e8b57"
-                : "#d9534f";
+            const openY =
+                priceToY(open);
 
-        ctx.lineWidth = 1;
+            const closeY =
+                priceToY(close);
 
-        ctx.stroke();
+            const bullish =
+                close >= open;
 
-        // ----------------------------------------------
-        // Candle body
-        // ----------------------------------------------
 
-        let bodyTop = Math.min(
-            openY,
-            closeY
-        );
+            // ------------------------------------------
+            // WICK
+            // ------------------------------------------
 
-        let bodyBottom = Math.max(
-            openY,
-            closeY
-        );
+            ctx.beginPath();
 
-        let bodyHeight =
-            bodyBottom - bodyTop;
+            ctx.moveTo(
+                x,
+                highY
+            );
 
-        // Ensure tiny candles remain visible
-        if (bodyHeight < 2) {
-            bodyHeight = 2;
+            ctx.lineTo(
+                x,
+                lowY
+            );
 
-            bodyTop =
-                ((openY + closeY) / 2) -
-                1;
+            ctx.strokeStyle =
+                bullish
+                    ? "#2e8b57"
+                    : "#d9534f";
+
+            ctx.lineWidth = 1;
+
+            ctx.stroke();
+
+
+            // ------------------------------------------
+            // BODY
+            // ------------------------------------------
+
+            let bodyTop =
+                Math.min(
+                    openY,
+                    closeY
+                );
+
+            let bodyBottom =
+                Math.max(
+                    openY,
+                    closeY
+                );
+
+            let bodyHeight =
+                bodyBottom -
+                bodyTop;
+
+
+            /*
+             * Keep very small price movements visible.
+             */
+            if (bodyHeight < 3) {
+
+                bodyHeight = 3;
+
+                bodyTop =
+                    (
+                        openY +
+                        closeY
+                    ) / 2 -
+                    bodyHeight / 2;
+            }
+
+
+            ctx.fillStyle =
+                bullish
+                    ? "#2e8b57"
+                    : "#d9534f";
+
+            ctx.fillRect(
+                x -
+                    candleWidth / 2,
+                bodyTop,
+                candleWidth,
+                bodyHeight
+            );
         }
+    );
 
-        ctx.fillStyle =
-            bullish
-                ? "#2e8b57"
-                : "#d9534f";
-
-        ctx.fillRect(
-            x - candleWidth / 2,
-            bodyTop,
-            candleWidth,
-            bodyHeight
-        );
-    });
 
     // --------------------------------------------------
     // LATEST PRICE
     // --------------------------------------------------
 
     const latest =
-        candleHistory[
-            candleHistory.length - 1
+        visibleHistory[
+            visibleHistory.length - 1
         ];
 
     const latestPrice =
         Number(latest.close);
 
+    if (!Number.isFinite(latestPrice)) {
+        return;
+    }
+
     const latestY =
         priceToY(latestPrice);
 
-    // Horizontal price line
+
+    // Price line
+
     ctx.beginPath();
 
     ctx.moveTo(
@@ -274,11 +535,18 @@ function drawMarketChart() {
     ctx.strokeStyle = "#ff8c00";
     ctx.lineWidth = 1;
 
-    ctx.setLineDash([5, 5]);
+    ctx.setLineDash([
+        5,
+        5
+    ]);
+
     ctx.stroke();
+
     ctx.setLineDash([]);
 
+
     // Latest price label
+
     ctx.fillStyle = "#ff8c00";
     ctx.font = "bold 11px Arial";
 
@@ -288,20 +556,50 @@ function drawMarketChart() {
         latestY + 4
     );
 }
+window.addEventListener(
+    "resize",
+    drawMarketChart
+);
 
-async function loadMarketCandles() {
+
+
+
+
+
+async function loadMarketCandles(
+    timeframe = currentTimeframe
+) {
+
+    console.log(
+        "Loading candles:",
+        timeframe
+    );
+
+    console.trace(
+        "loadMarketCandles CALL STACK"
+    );
+
     try {
+        console.log("Loading candles:", timeframe);
+
         const response = await fetch(
-            "/api/market/candles/?symbol=BTCUSDT&limit=100"
+            `/api/market/candles/?symbol=BTCUSDT&timeframe=${encodeURIComponent(timeframe)}&limit=100`,
+            {
+                method: "GET",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json"
+                }
+            }
         );
 
         if (!response.ok) {
-            throw new Error(
-                `HTTP ${response.status}`
-            );
+            throw new Error(`HTTP ${response.status}`);
         }
 
         const result = await response.json();
+
+        console.log("Candle API response:", result);
 
         candleHistory = result.data || [];
 
@@ -314,12 +612,81 @@ async function loadMarketCandles() {
         );
     }
 }
-loadMarketCandles();
+
+
+function initTimeframeButtons() {
+    const buttons =
+        document.querySelectorAll(".timeframe-btn");
+
+    console.log(
+        "Timeframe buttons found:",
+        buttons.length
+    );
+
+    buttons.forEach(button => {
+        button.onclick = async () => {
+
+            const timeframe =
+                button.dataset.timeframe;
+
+            console.log(
+                "Timeframe clicked:",
+                timeframe
+            );
+
+            currentTimeframe = timeframe;
+
+            buttons.forEach(btn => {
+                btn.classList.remove("active");
+            });
+
+            button.classList.add("active");
+
+            await loadMarketCandles(timeframe);
+        };
+    });
+}
+
+
+if (document.readyState === "loading") {
+    document.addEventListener(
+        "DOMContentLoaded",
+        initTimeframeButtons,
+        { once: true }
+    );
+} else {
+    initTimeframeButtons();
+}
+
+
+/*
+ * Initial chart load — exactly once.
+ */
+loadMarketCandles("1m");
+
+
+/*
+ * Update the current selected candle.
+ */
+setInterval(
+    updateLatestCandle,
+    1000
+);
+
 
 async function updateLatestCandle() {
+
     try {
+
         const response = await fetch(
-            "/api/market/candles/?symbol=BTCUSDT&limit=1"
+            `/api/market/candles/?symbol=BTCUSDT&timeframe=${encodeURIComponent(currentTimeframe)}&limit=1`,
+            {
+                method: "GET",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json"
+                }
+            }
         );
 
         if (!response.ok) {
@@ -328,9 +695,13 @@ async function updateLatestCandle() {
             );
         }
 
-        const result = await response.json();
+        const result =
+            await response.json();
 
-        if (!result.data || result.data.length === 0) {
+        if (
+            !result.data ||
+            result.data.length === 0
+        ) {
             return;
         }
 
@@ -338,31 +709,27 @@ async function updateLatestCandle() {
             result.data[0];
 
         if (candleHistory.length === 0) {
+
             candleHistory.push(latest);
+
         } else {
+
             const last =
                 candleHistory[
                     candleHistory.length - 1
                 ];
 
-            if (
-                last.time === latest.time
-            ) {
-                // Same minute:
-                // update the existing candle
+            if (last.time === latest.time) {
+
                 candleHistory[
                     candleHistory.length - 1
                 ] = latest;
 
             } else {
-                // New minute:
-                // add a new candle
+
                 candleHistory.push(latest);
 
-                // Keep chart manageable
-                if (
-                    candleHistory.length > 100
-                ) {
+                if (candleHistory.length > 100) {
                     candleHistory.shift();
                 }
             }
@@ -370,15 +737,25 @@ async function updateLatestCandle() {
 
         drawMarketChart();
 
-        
-
     } catch (error) {
+
         console.error(
             "Failed to update candle:",
             error
         );
     }
 }
+
+
+
+
+
+
+
+/*
+ * Keep the current candle updated.
+ */
+
 setInterval(
     updateLatestCandle,
     1000
@@ -418,11 +795,11 @@ window.addEventListener(
     "load",
     async () => {
 
-        await refreshMarket();
+        
 
         await refreshEvents();
 
-        await updatePosition();
+       
     }
 );
 
@@ -464,7 +841,6 @@ generateMarketTick();
 // Generate another synthetic tick every 2 seconds
 setInterval(generateMarketTick, 1000);
 
-let selectedTradeSide = "LONG";
 
 
 
@@ -614,33 +990,64 @@ function generateIdempotencyKey() {
         .join("");
 }
 
-async function purchaseAU(amount) {
+async function purchaseAU(amount, phone) {
 
     if (!amount || Number(amount) <= 0) {
-        throw new Error("Enter a valid purchase amount.");
+        throw new Error(
+            "Enter a valid purchase amount."
+        );
     }
 
-    const idempotencyKey = generateIdempotencyKey();
+    if (!phone) {
+        throw new Error(
+            "Enter your M-PESA phone number."
+        );
+    }
 
-    const body = new URLSearchParams();
+    const idempotencyKey =
+        generateIdempotencyKey();
 
-    body.append("amount", amount);
+    const body =
+        new URLSearchParams();
+
+    body.append(
+        "amount",
+        amount
+    );
+
+    body.append(
+        "phone",
+        phone
+    );
 
     const response = await fetch(
         "/api/wallet/purchase/",
         {
             method: "POST",
 
+            credentials:
+                "same-origin",
+
             headers: {
-                "X-CSRFToken": getCSRFToken(),
-                "Idempotency-Key": idempotencyKey,
+                "X-CSRFToken":
+                    getCSRFToken(),
+
+                "Idempotency-Key":
+                    idempotencyKey,
+
+                "Accept":
+                    "application/json",
+
+                "Content-Type":
+                    "application/x-www-form-urlencoded;charset=UTF-8",
             },
 
             body: body,
         }
     );
 
-    const text = await response.text();
+    const text =
+        await response.text();
 
     let data;
 
@@ -653,6 +1060,7 @@ async function purchaseAU(amount) {
     }
 
     if (!response.ok || !data.success) {
+
         throw new Error(
             data.error ||
             `Purchase failed (${response.status})`
@@ -660,202 +1068,6 @@ async function purchaseAU(amount) {
     }
 
     return data;
-}
-
-async function sendPurchaseRequest(
-    amount,
-    idempotencyKey
-) {
-
-    const response = await fetch(
-        "/api/wallet/purchase/",
-        {
-            method: "POST",
-
-            credentials: "same-origin",
-
-            headers: {
-                "Content-Type":
-                    "application/json",
-
-                "Accept":
-                    "application/json",
-
-                "X-CSRFToken":
-                    getCSRFToken(),
-
-                "Idempotency-Key":
-                    idempotencyKey,
-            },
-
-            body: JSON.stringify({
-                amount: String(amount)
-            }),
-        }
-    );
-
-    const data =
-        await response.json();
-
-    if (!response.ok) {
-
-        throw new Error(
-            data.error ||
-            "Purchase failed."
-        );
-    }
-
-    return data;
-}
-
-async function purchaseAUWithRetry(amount) {
-
-    const key =
-        generateIdempotencyKey();
-
-    try {
-
-        return await sendPurchaseRequest(
-            amount,
-            key
-        );
-
-    } catch (error) {
-
-        console.warn(
-            "Purchase request failed. Retrying...",
-            error
-        );
-
-        // IMPORTANT:
-        // Reuse the SAME key.
-
-        return await sendPurchaseRequest(
-            amount,
-            key
-        );
-    }
-}
-
-async function withdrawAU(amount, phone, idempotencyKey) {
-
-    const response = await fetch("/api/withdraw/", {
-        method: "POST",
-
-        credentials: "same-origin",
-
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Idempotency-Key": idempotencyKey,
-            "X-CSRFToken": getCsrfToken()
-        },
-
-        body: JSON.stringify({
-            au_amount: amount,
-            phone: phone
-        })
-    });
-
-    const contentType =
-        response.headers.get("content-type") || "";
-
-    if (!contentType.includes("application/json")) {
-
-        const text = await response.text();
-
-        console.error(
-            "Withdrawal returned non-JSON:",
-            response.status,
-            text
-        );
-
-        throw new Error(
-            `Withdrawal request returned HTTP ${response.status} instead of JSON.`
-        );
-    }
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        throw new Error(
-            data.error ||
-            data.message ||
-            "Withdrawal failed."
-        );
-    }
-
-    return data;
-}
-
-async function sendWithdrawalRequest(
-    auAmount,
-    idempotencyKey
-) {
-
-    const response = await fetch(
-        "/api/wallet/withdraw/",
-        {
-            method: "POST",
-
-            credentials: "same-origin",
-
-            headers: {
-                "Content-Type":
-                    "application/json",
-
-                "Accept":
-                    "application/json",
-
-                "X-CSRFToken":
-                    getCSRFToken(),
-
-                "Idempotency-Key":
-                    idempotencyKey,
-            },
-
-            body: JSON.stringify({
-                au_amount:
-                    String(auAmount)
-            }),
-        }
-    );
-
-    const data =
-        await response.json();
-
-    if (!response.ok) {
-
-        throw new Error(
-            data.error ||
-            "Withdrawal failed."
-        );
-    }
-
-    return data;
-}
-
-
-
-let purchaseInProgress = false;
-
-function openPurchaseModal(amount) {
-
-    pendingPurchaseAmount = amount;
-
-    pendingPurchaseIdempotencyKey =
-        generateIdempotencyKey();
-
-    document.getElementById(
-        "confirmPurchaseAmount"
-    ).textContent =
-        Number(amount).toFixed(2);
-
-    document.getElementById(
-        "purchaseModal"
-    ).style.display = "flex";
-
-    
 }
 
 async function handlePurchase() {
@@ -989,6 +1201,112 @@ function resetPurchaseModal() {
     }
 }
 
+async function waitForPurchaseCompletion(
+    transactionId,
+    maxAttempts = 30,
+    interval = 2000
+) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+
+        console.log(
+            `Checking M-PESA payment status (${attempt + 1}/${maxAttempts})...`
+        );
+
+        const response = await fetch(
+            `/api/wallet/purchase/status/${encodeURIComponent(transactionId)}/`,
+            {
+                method: "GET",
+
+                credentials: "same-origin",
+
+                headers: {
+                    "Accept": "application/json",
+                },
+            }
+        );
+
+        const text = await response.text();
+
+        let data;
+
+        try {
+            data = JSON.parse(text);
+        } catch (error) {
+            throw new Error(
+                `Payment status returned invalid response (${response.status}).`
+            );
+        }
+
+        if (!response.ok || !data.success) {
+            throw new Error(
+                data.error ||
+                "Unable to check M-PESA payment status."
+            );
+        }
+
+        console.log(
+            "M-PESA status:",
+            data.status
+        );
+
+        /*
+         * PAYMENT COMPLETED
+         */
+        if (data.status === "COMPLETED") {
+
+            return data;
+        }
+
+        /*
+         * PAYMENT FAILED
+         */
+        if (data.status === "FAILED") {
+
+            throw new Error(
+                data.message ||
+                "M-PESA payment failed or was cancelled."
+            );
+        }
+
+        /*
+         * PAYMENT STILL PENDING
+         */
+        if (data.status === "PENDING") {
+
+            const processingMessage =
+                document.getElementById(
+                    "paymentProcessingMessage"
+                );
+
+            if (processingMessage) {
+
+                processingMessage.textContent =
+                    "Waiting for M-PESA payment confirmation...";
+            }
+
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        interval
+                    )
+            );
+
+            continue;
+        }
+
+        /*
+         * UNKNOWN STATUS
+         */
+        throw new Error(
+            `Unknown payment status: ${data.status}`
+        );
+    }
+
+    throw new Error(
+        "Payment confirmation timed out. Please check your M-PESA messages."
+    );
+}
 async function confirmPurchase() {
 
     if (purchaseInProgress) {
@@ -996,14 +1314,19 @@ async function confirmPurchase() {
     }
 
     const amountInput =
-        document.getElementById(
-            "purchaseAmount"
-        );
+        document.getElementById("purchaseAmount");
 
     const phoneInput =
-        document.getElementById(
-            "mpesaPhone"
+        document.getElementById("mpesaPhone");
+
+    if (!amountInput || !phoneInput) {
+
+        showPurchaseError(
+            "Purchase amount or M-PESA phone field is missing."
         );
+
+        return;
+    }
 
     const amount =
         amountInput.value.trim();
@@ -1011,8 +1334,10 @@ async function confirmPurchase() {
     const phone =
         phoneInput.value.trim();
 
-
-    if (!amount || Number(amount) <= 0) {
+    if (
+        !amount ||
+        Number(amount) <= 0
+    ) {
 
         showPurchaseError(
             "Enter a valid purchase amount."
@@ -1021,115 +1346,352 @@ async function confirmPurchase() {
         return;
     }
 
-
     if (!phone) {
 
         showPurchaseError(
-            "Enter the M-Pesa phone number."
+            "Enter the M-PESA phone number."
         );
 
         return;
     }
 
-
     purchaseInProgress = true;
-
 
     const button =
         document.getElementById(
             "confirmPurchaseButton"
         );
 
-    button.disabled = true;
+    if (button) {
+        button.disabled = true;
+    }
 
+    const paymentStep =
+        document.getElementById(
+            "paymentStep"
+        );
 
-    /*
-     * Show processing state
-     */
+    const paymentProcessing =
+        document.getElementById(
+            "paymentProcessing"
+        );
 
-    document.getElementById(
-        "paymentStep"
-    ).style.display = "none";
+    if (paymentStep) {
+        paymentStep.style.display = "none";
+    }
 
-    document.getElementById(
-        "paymentProcessing"
-    ).style.display = "block";
-
+    if (paymentProcessing) {
+        paymentProcessing.style.display = "block";
+    }
 
     try {
 
         /*
-         * This calls your existing purchaseAU()
-         * function.
-         *
-         * Your existing purchaseAU() should be
-         * responsible for:
-         *
-         * - generating idempotency key
-         * - sending KES amount
-         * - server-side price lookup
-         * - simulated M-Pesa transaction
-         * - wallet credit
-         * - transaction ledger
+         * ==================================================
+         * STEP 1
+         * CREATE PENDING PURCHASE
+         * ==================================================
          */
 
-        const result =
-            await purchaseAU(amount, phone);
-
+        const pendingResult =
+            await purchaseAU(
+                amount,
+                phone
+            );
 
         console.log(
-            "Purchase verified:",
-            result
+            "M-PESA STK Push response:",
+            pendingResult
         );
 
 
         /*
-         * Show success
+         * ==================================================
+         * STEP 2
+         * GET TRANSACTION ID
+         * ==================================================
          */
 
-        document.getElementById(
-            "paymentProcessing"
-        ).style.display = "none";
+        const transactionId =
+            pendingResult.transaction_reference;
 
-        document.getElementById(
-            "paymentSuccess"
-        ).style.display = "block";
+        if (!transactionId) {
 
-
-        /*
-         * Display amount actually credited
-         */
-
-        const auAmount =
-            result.au_amount ??
-            result.quantity ??
-            result.amount_au ??
-            0;
-
-        document.getElementById(
-            "successAuAmount"
-        ).textContent =
-            Number(auAmount).toFixed(8);
-
-
-        /*
-         * Refresh dashboard
-         */
-
-        await updatePortfolio();
-
-        /*
-         * Refresh any payment/event
-         * sections if your app.js has them.
-         */
-
-        if (typeof loadPayments === "function") {
-            await loadPayments();
+            throw new Error(
+                "Payment transaction reference was not returned."
+            );
         }
 
-        if (typeof loadEvents === "function") {
-            await loadEvents();
+        console.log(
+            "Transaction:",
+            transactionId
+        );
+
+
+        /*
+         * ==================================================
+         * STEP 3
+         * PAYMENT MUST BE PENDING
+         * ==================================================
+         */
+
+        if (
+            pendingResult.payment_status !==
+            "PENDING"
+        ) {
+
+            throw new Error(
+                pendingResult.message ||
+                "Unexpected payment status."
+            );
         }
+
+
+        /*
+         * ==================================================
+         * STEP 4
+         * SHOW PROCESSING MESSAGE
+         * ==================================================
+         */
+
+        const processingMessage =
+            document.getElementById(
+                "paymentProcessingMessage"
+            );
+
+        if (processingMessage) {
+
+            processingMessage.textContent =
+                "SIMULATION: Payment request created. Confirming payment...";
+        }
+
+
+        /*
+         * ==================================================
+         * STEP 5
+         * SIMULATE DARAJA CALLBACK
+         * ==================================================
+         *
+         * This is ONLY for the sandbox simulation.
+         *
+         * It calls:
+         *
+         * /api/mpesa/simulate-callback/
+         *
+         * That endpoint then calls the same
+         * mpesa_callback() logic used by real Daraja.
+         */
+
+        const callbackResponse =
+        await fetch(
+            `/api/wallet/purchase/${encodeURIComponent(
+                pendingResult.transaction_reference
+            )}/simulate-callback/`,
+            {
+                method: "POST",
+
+                credentials: "same-origin",
+
+                headers: {
+                    "X-CSRFToken":
+                        getCSRFToken(),
+
+                    "Accept":
+                        "application/json",
+                },
+            }
+        );
+
+
+        const callbackText =
+            await callbackResponse.text();
+
+        let callbackData;
+
+        try {
+
+            callbackData =
+                JSON.parse(
+                    callbackText
+                );
+
+        } catch (error) {
+
+            throw new Error(
+                `Callback failed (${callbackResponse.status}): ${callbackText}`
+            );
+        }
+
+
+        if (
+            !callbackResponse.ok ||
+            !callbackData.success
+        ) {
+
+            throw new Error(
+                callbackData.error ||
+                "Simulated payment failed."
+            );
+        }
+
+
+        console.log(
+            "Simulated payment completed:",
+            callbackData
+        );
+
+
+        /*
+         * ==================================================
+         * STEP 6
+         * CHECK DATABASE STATUS
+         * ==================================================
+         *
+         * The callback should now have changed:
+         *
+         * PENDING → COMPLETED
+         */
+
+        const statusResponse =
+        await fetch(
+            `/api/wallet/purchase/status/${encodeURIComponent(
+                transactionId
+            )}/`,
+            {
+                method: "GET",
+
+                credentials: "same-origin",
+
+                headers: {
+                    "Accept": "application/json",
+                },
+            }
+        );
+
+
+        const statusText =
+            await statusResponse.text();
+
+        let statusData;
+
+        try {
+
+            statusData =
+                JSON.parse(
+                    statusText
+                );
+
+        } catch (error) {
+
+            throw new Error(
+                `Status check failed (${statusResponse.status}): ${statusText}`
+            );
+        }
+
+
+        if (
+            !statusResponse.ok ||
+            !statusData.success
+        ) {
+
+            throw new Error(
+                statusData.error ||
+                "Unable to verify payment status."
+            );
+        }
+
+
+        console.log(
+            "Purchase status:",
+            statusData
+        );
+
+
+        /*
+         * ==================================================
+         * STEP 7
+         * VERIFY COMPLETED
+         * ==================================================
+         */
+
+        if (
+            statusData.status ===
+            "COMPLETED"
+        ) {
+
+            showPurchaseSuccess({
+                ...pendingResult,
+
+                ...statusData,
+
+                payment_status:
+                    "COMPLETED",
+
+                au_amount:
+                    statusData.au_amount,
+            });
+
+
+            /*
+             * Refresh wallet/portfolio
+             */
+
+            await updatePortfolio();
+
+
+            /*
+             * Refresh payments
+             */
+
+            if (
+                typeof loadPayments ===
+                "function"
+            ) {
+
+                await loadPayments();
+            }
+
+
+            /*
+             * Refresh events
+             */
+
+            if (
+                typeof loadEvents ===
+                "function"
+            ) {
+
+                await loadEvents();
+            }
+
+
+            return;
+        }
+
+
+        /*
+         * ==================================================
+         * STEP 8
+         * FAILED / UNEXPECTED STATUS
+         * ==================================================
+         */
+
+        if (
+            statusData.status ===
+            "FAILED"
+        ) {
+
+            throw new Error(
+                statusData.message ||
+                "M-PESA payment failed."
+            );
+        }
+
+
+        throw new Error(
+            statusData.message ||
+            `Payment is still ${statusData.status}.`
+        );
 
 
     } catch (error) {
@@ -1141,17 +1703,51 @@ async function confirmPurchase() {
 
         showPurchaseError(
             error.message ||
-            "Payment verification failed."
+            "Payment could not be completed."
         );
 
     } finally {
 
         purchaseInProgress = false;
 
-        button.disabled = false;
+        if (button) {
+            button.disabled = false;
+        }
     }
 }
+function showPurchaseSuccess(result) {
 
+    document.getElementById(
+        "paymentProcessing"
+    ).style.display = "none";
+
+    document.getElementById(
+        "paymentError"
+    ).style.display = "none";
+
+    document.getElementById(
+        "paymentSuccess"
+    ).style.display = "block";
+
+    const auAmount =
+        result.au_amount || "0";
+
+    const successAuAmount =
+        document.getElementById(
+            "successAuAmount"
+        );
+
+    if (successAuAmount) {
+
+        successAuAmount.textContent =
+            Number(auAmount).toFixed(8);
+    }
+
+    console.log(
+        "M-PESA receipt:",
+        result.receipt
+    );
+}
 function showPurchaseError(message) {
 
     document.getElementById(
@@ -1177,9 +1773,207 @@ function showPurchaseError(message) {
 
 let withdrawalInProgress = false;
 
+let purchaseInProgress = false;
+
+function openPurchaseModal(amount) {
+
+    pendingPurchaseAmount = amount;
+
+    pendingPurchaseIdempotencyKey =
+        generateIdempotencyKey();
+
+    document.getElementById(
+        "confirmPurchaseAmount"
+    ).textContent =
+        Number(amount).toFixed(2);
+
+    document.getElementById(
+        "purchaseModal"
+    ).style.display = "flex";
+
+    
+}
+
+function togglePurchasePanel() {
+
+    const panel =
+        document.getElementById("purchasePanel");
+
+    const toggleButton =
+        document.getElementById("buyAuToggleButton");
+
+    if (!panel || !toggleButton) {
+        console.error(
+            "Purchase panel elements not found."
+        );
+        return;
+    }
+
+    const isOpen =
+        panel.style.display !== "none";
+
+    if (isOpen) {
+
+        cancelPurchase();
+
+    } else {
+
+        panel.style.display = "block";
+
+        toggleButton.textContent =
+            "Close Buy AU";
+    }
+}
+
+function cancelPurchase() {
+
+    const panel =
+        document.getElementById(
+            "purchasePanel"
+        );
+
+    const toggleButton =
+        document.getElementById(
+            "buyAuToggleButton"
+        );
+
+    const amountInput =
+        document.getElementById(
+            "purchaseAmount"
+        );
+
+    const phoneInput =
+        document.getElementById(
+            "mpesaPhone"
+        );
+
+    const status =
+        document.getElementById(
+            "purchaseStatus"
+        );
+
+    if (amountInput) {
+        amountInput.value = "";
+    }
+
+    if (phoneInput) {
+        phoneInput.value = "";
+    }
+
+    if (status) {
+        status.textContent = "";
+    }
+
+    /*
+     * Reset the modal.
+     */
+
+    closePurchaseModal();
+
+    /*
+     * Reset the purchase amount display.
+     */
+
+    const modalAmount =
+        document.getElementById(
+            "modalPurchaseAmount"
+        );
+
+    const modalPrice =
+        document.getElementById(
+            "modalAuPrice"
+        );
+
+    const modalQuantity =
+        document.getElementById(
+            "modalAuQuantity"
+        );
+
+    if (modalAmount) {
+        modalAmount.textContent = "0.00";
+    }
+
+    if (modalPrice) {
+        modalPrice.textContent = "0.00000000";
+    }
+
+    if (modalQuantity) {
+        modalQuantity.textContent = "0.00000000";
+    }
+
+
+    /*
+     * Close panel.
+     */
+
+    if (panel) {
+        panel.style.display = "none";
+    }
+
+    if (toggleButton) {
+        toggleButton.textContent =
+            "Buy AU";
+    }
+}
+async function withdrawAU(amount, phone, idempotencyKey) {
+
+    const response = await fetch(
+        "/api/withdraw/",
+        {
+            method: "POST",
+
+            credentials: "same-origin",
+
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+
+                "Idempotency-Key":
+                    idempotencyKey,
+
+                "X-CSRFToken":
+                    getCSRFToken()
+            },
+
+            body: JSON.stringify({
+                au_amount: String(amount),
+                phone: phone
+            })
+        }
+    );
+
+    const text = await response.text();
+
+    let data;
+
+    try {
+        data = JSON.parse(text);
+    } catch (error) {
+
+        throw new Error(
+            `Withdrawal request returned HTTP ${response.status}: ${text}`
+        );
+    }
+
+    if (!response.ok || !data.success) {
+
+        throw new Error(
+            data.error ||
+            data.message ||
+            "Withdrawal failed."
+        );
+    }
+
+    return data;
+}
+
+
+
+
+
+
 async function handleWithdrawal() {
 
-    // Prevent another click while this withdrawal is processing
     if (withdrawalInProgress) {
         return;
     }
@@ -1197,9 +1991,11 @@ async function handleWithdrawal() {
         document.getElementById("withdrawalStatus");
 
     if (!button || !amountInput || !phoneInput) {
+
         console.error(
             "Withdrawal elements not found."
         );
+
         return;
     }
 
@@ -1210,65 +2006,318 @@ async function handleWithdrawal() {
         phoneInput.value.trim();
 
     if (!amount || Number(amount) <= 0) {
-        alert("Enter a valid AU amount.");
+
+        alert(
+            "Enter a valid AU amount."
+        );
+
         return;
     }
 
     if (!phone) {
-        alert("Enter an M-Pesa number.");
+
+        alert(
+            "Enter an M-Pesa number."
+        );
+
         return;
     }
 
     /*
-     * Lock immediately BEFORE making the request.
+     * Only allow the confirmed amount
+     * to be submitted.
      */
+
+    if (!withdrawalAmountConfirmed) {
+
+        alert(
+            "Please confirm the withdrawal amount first."
+        );
+
+        return;
+    }
+
+    /*
+     * Lock withdrawal.
+     */
+
     withdrawalInProgress = true;
 
     button.disabled = true;
     button.textContent = "Processing...";
 
     if (status) {
+
         status.textContent =
-            "Processing withdrawal...";
+            "Creating withdrawal request...";
     }
 
-    /*
-     * One unique key for this withdrawal attempt.
-     */
     const idempotencyKey =
         generateIdempotencyKey();
 
     try {
 
-        const result =
+        /*
+         * ==================================================
+         * STEP 1
+         * CREATE PENDING WITHDRAWAL
+         * ==================================================
+         */
+
+        const pendingResult =
             await withdrawAU(
-                amount,
+                confirmedWithdrawalAmount,
                 phone,
                 idempotencyKey
             );
 
         console.log(
-            "Withdrawal completed:",
-            result
+            "Withdrawal created:",
+            pendingResult
         );
 
+        /*
+         * Must be PENDING.
+         */
+
+        if (
+            pendingResult.payment_status !==
+            "PENDING"
+        ) {
+
+            throw new Error(
+                pendingResult.message ||
+                "Unexpected withdrawal status."
+            );
+        }
+
+        const transactionId =
+            pendingResult.transaction_reference;
+
+        if (!transactionId) {
+
+            throw new Error(
+                "Withdrawal transaction reference was not returned."
+            );
+        }
+
+        console.log(
+            "Withdrawal transaction:",
+            transactionId
+        );
+
+        /*
+         * ==================================================
+         * STEP 2
+         * SHOW PROCESSING
+         * ==================================================
+         */
+
         if (status) {
+
             status.textContent =
-                result.message ||
-                "Withdrawal completed successfully.";
+                "Withdrawal request created. Processing simulated M-PESA payout...";
         }
 
         /*
-         * Refresh account data after backend confirmation.
+         * ==================================================
+         * STEP 3
+         * SIMULATE M-PESA CALLBACK
+         * ==================================================
          */
-        await updatePortfolio();
+
+        const callbackResponse =
+            await fetch(
+                `/api/withdraw/${encodeURIComponent(
+                    transactionId
+                )}/simulate-callback/`,
+                {
+                    method: "POST",
+
+                    credentials:
+                        "same-origin",
+
+                    headers: {
+                        "X-CSRFToken":
+                            getCSRFToken(),
+
+                        "Accept":
+                            "application/json",
+                    },
+                }
+            );
+
+        const callbackText =
+            await callbackResponse.text();
+
+        let callbackData;
+
+        try {
+
+            callbackData =
+                JSON.parse(callbackText);
+
+        } catch (error) {
+
+            throw new Error(
+                `Withdrawal callback failed (${callbackResponse.status}): ${callbackText}`
+            );
+        }
+
+        if (
+            !callbackResponse.ok ||
+            !callbackData.success
+        ) {
+
+            throw new Error(
+                callbackData.error ||
+                "Simulated withdrawal failed."
+            );
+        }
+
+        console.log(
+            "Withdrawal callback completed:",
+            callbackData
+        );
 
         /*
-         * Refresh the withdrawal estimate using
-         * the new AU balance/market state.
+         * ==================================================
+         * STEP 4
+         * CHECK FINAL DATABASE STATUS
+         * ==================================================
          */
-        await updateWithdrawalEstimate();
-        
+
+        const statusResponse =
+            await fetch(
+                `/api/withdraw/status/${encodeURIComponent(
+                    transactionId
+                )}/`,
+                {
+                    method: "GET",
+
+                    credentials:
+                        "same-origin",
+
+                    headers: {
+                        "Accept":
+                            "application/json",
+                    },
+                }
+            );
+
+        const statusText =
+            await statusResponse.text();
+
+        let statusData;
+
+        try {
+
+            statusData =
+                JSON.parse(statusText);
+
+        } catch (error) {
+
+            throw new Error(
+                `Withdrawal status check failed (${statusResponse.status}): ${statusText}`
+            );
+        }
+
+        if (
+            !statusResponse.ok ||
+            !statusData.success
+        ) {
+
+            throw new Error(
+                statusData.error ||
+                "Unable to verify withdrawal status."
+            );
+        }
+
+        console.log(
+            "Withdrawal status:",
+            statusData
+        );
+
+        /*
+         * ==================================================
+         * STEP 5
+         * VERIFY COMPLETED
+         * ==================================================
+         */
+
+        if (
+            statusData.status ===
+            "COMPLETED"
+        ) {
+
+            if (status) {
+
+                status.textContent =
+                    "Withdrawal completed successfully.";
+            }
+
+            console.log(
+                "Withdrawal completed:",
+                statusData
+            );
+
+            /*
+             * Refresh wallet.
+             */
+
+            await updatePortfolio();
+
+            /*
+             * Refresh withdrawal estimate.
+             */
+
+            await updateWithdrawalEstimate();
+
+            /*
+             * Refresh transaction history.
+             */
+
+            if (
+                typeof loadPayments ===
+                "function"
+            ) {
+
+                await loadPayments();
+            }
+
+            if (
+                typeof loadEvents ===
+                "function"
+            ) {
+
+                await loadEvents();
+            }
+
+            return;
+        }
+
+        /*
+         * ==================================================
+         * STEP 6
+         * FAILED
+         * ==================================================
+         */
+
+        if (
+            statusData.status ===
+            "FAILED"
+        ) {
+
+            throw new Error(
+                statusData.message ||
+                "Withdrawal failed."
+            );
+        }
+
+        throw new Error(
+            statusData.message ||
+            `Withdrawal is still ${statusData.status}.`
+        );
 
     } catch (error) {
 
@@ -1278,28 +2327,23 @@ async function handleWithdrawal() {
         );
 
         if (status) {
+
             status.textContent =
                 error.message ||
                 "Withdrawal failed.";
         }
-
-        /*
-         * The button becomes available again ONLY
-         * because the backend request has completed
-         * with an error.
-         */
 
     } finally {
 
         withdrawalInProgress = false;
 
         button.disabled = false;
+
         button.textContent =
             "Withdraw to M-Pesa";
     }
+    
 }
-
-
 
 async function updateWithdrawalEstimate() {
 
@@ -1557,6 +2601,32 @@ function toggleWithdrawalPanel() {
     }
 }
 
+function closeWithdrawalModalAfterSuccess() {
+
+    const panel =
+        document.getElementById(
+            "withdrawalPanel"
+        );
+
+    const toggleButton =
+        document.getElementById(
+            "withdrawToggleButton"
+        );
+
+    if (panel) {
+        panel.style.display = "none";
+    }
+
+    if (toggleButton) {
+        toggleButton.textContent =
+            "Withdraw AU";
+    }
+
+    console.log(
+        "Withdrawal panel closed after successful withdrawal."
+    );
+}
+
 function cancelWithdrawal() {
 
     if (withdrawalInProgress) {
@@ -1666,127 +2736,7 @@ function cancelWithdrawal() {
     }
 }
 
-function togglePurchasePanel() {
 
-    const panel =
-        document.getElementById("purchasePanel");
-
-    const toggleButton =
-        document.getElementById("buyAuToggleButton");
-
-    if (!panel || !toggleButton) {
-        console.error(
-            "Purchase panel elements not found."
-        );
-        return;
-    }
-
-    const isOpen =
-        panel.style.display !== "none";
-
-    if (isOpen) {
-
-        cancelPurchase();
-
-    } else {
-
-        panel.style.display = "block";
-
-        toggleButton.textContent =
-            "Close Buy AU";
-    }
-}
-
-function cancelPurchase() {
-
-    const panel =
-        document.getElementById(
-            "purchasePanel"
-        );
-
-    const toggleButton =
-        document.getElementById(
-            "buyAuToggleButton"
-        );
-
-    const amountInput =
-        document.getElementById(
-            "purchaseAmount"
-        );
-
-    const phoneInput =
-        document.getElementById(
-            "mpesaPhone"
-        );
-
-    const status =
-        document.getElementById(
-            "purchaseStatus"
-        );
-
-    if (amountInput) {
-        amountInput.value = "";
-    }
-
-    if (phoneInput) {
-        phoneInput.value = "";
-    }
-
-    if (status) {
-        status.textContent = "";
-    }
-
-    /*
-     * Reset the modal.
-     */
-
-    closePurchaseModal();
-
-    /*
-     * Reset the purchase amount display.
-     */
-
-    const modalAmount =
-        document.getElementById(
-            "modalPurchaseAmount"
-        );
-
-    const modalPrice =
-        document.getElementById(
-            "modalAuPrice"
-        );
-
-    const modalQuantity =
-        document.getElementById(
-            "modalAuQuantity"
-        );
-
-    if (modalAmount) {
-        modalAmount.textContent = "0.00";
-    }
-
-    if (modalPrice) {
-        modalPrice.textContent = "0.00000000";
-    }
-
-    if (modalQuantity) {
-        modalQuantity.textContent = "0.00000000";
-    }
-
-
-    /*
-     * Close panel.
-     */
-
-    if (panel) {
-        panel.style.display = "none";
-    }
-
-    if (toggleButton) {
-        toggleButton.textContent =
-            "Buy AU";
-    }
-}
 
 async function updateTransactionHistory() {
 

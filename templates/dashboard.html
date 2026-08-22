@@ -160,19 +160,13 @@
 
         <!-- CHART -->
 
-        <div style="margin-top:15px;">
+        
 
-            <canvas
-                id="chart"
-                width="900"
-                height="260"
-                style="
-                    width:100%;
-                    height:260px;
-                "
-            ></canvas>
-
+        <div class="chart-container">
+                <canvas id="chart"></canvas>
         </div>
+
+        
 
 
         <!-- CHART INFORMATION -->
@@ -219,7 +213,13 @@
                 margin-top:15px;
             "
         >
-
+             <button
+                type="button"
+                class="timeframe-btn active"
+                data-timeframe="1m"
+            >
+                1m
+            </button>
             <button
                 type="button"
                 class="timeframe-btn"

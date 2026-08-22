@@ -1,6 +1,12 @@
 from pathlib import Path
+import os
+
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = "dev-only-fraudlab-secret-change-me"
 DEBUG = True
@@ -50,6 +56,9 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {
+            "timeout": 20,
+        },
     }
 }
 

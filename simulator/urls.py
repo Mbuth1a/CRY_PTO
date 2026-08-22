@@ -68,4 +68,36 @@ urlpatterns = [
         name="transaction_history_api",
     ),
     path("", views.site_entry, name="site_entry"),
+    path(
+    "api/mpesa/callback/",
+    views.mpesa_callback,
+    name="mpesa_callback",
+    ),
+    path(
+        "api/wallet/payment-status/",
+        views.payment_status,
+        name="payment_status",
+    ),
+    path(
+    "api/wallet/purchase/status/<str:transaction_id>/",
+    views.purchase_status,
+    name="purchase_status",
+    ),
+    path(
+    "api/wallet/purchase/<str:transaction_id>/simulate-callback/",
+    views.simulate_mpesa_callback,
+    name="simulate_mpesa_callback",
+    ),
+    path(
+    "api/withdraw/<str:transaction_id>/simulate-callback/",
+    views.simulate_withdrawal_callback,
+    name="simulate_withdrawal_callback",
+),
+
+path(
+    "api/withdraw/status/<str:transaction_id>/",
+    views.withdrawal_status,
+    name="withdrawal_status",
+),
+
 ]

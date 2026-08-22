@@ -12,6 +12,12 @@ from django.db import IntegrityError
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
+import base64
+import os
+from datetime import datetime
+import requests
+
+from django.core.exceptions import ImproperlyConfigured
 
 from .models import  MarketTick
 
@@ -112,7 +118,7 @@ def generate_market_tick():
     movement = Decimal(
     str(
         random.gauss(0, 0.0001)
-        + random.uniform(-0.0003, 0.0004)
+        + random.uniform(-0.0007, 0.0007)
     )
     )
 
@@ -667,3 +673,201 @@ def purchase_au(
         )
 
     return ledger
+
+
+
+    # /*Mpesa Integration
+
+
+
+
+def get_mpesa_base_url():
+    environment = os.getenv(
+        "MPESA_ENVIRONMENT",
+        "sandbox"
+    ).lower()
+
+    if environment == "production":
+        return "https://api.safaricom.co.ke"
+
+    return "https://sandbox.safaricom.co.ke"
+
+
+def get_mpesa_access_token():
+
+    consumer_key = os.getenv(
+        "MPESA_CONSUMER_KEY"
+    )
+
+    consumer_secret = os.getenv(
+        "MPESA_CONSUMER_SECRET"
+    )
+
+    if not consumer_key or not consumer_secret:
+        raise ImproperlyConfigured(
+            "M-PESA consumer credentials are not configured."
+        )
+
+    response = requests.get(
+        f"{get_mpesa_base_url()}/oauth/v1/generate"
+        "?grant_type=client_credentials",
+        auth=(
+            consumer_key,
+            consumer_secret,
+        ),
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    access_token = data.get("access_token")
+
+    if not access_token:
+        raise ValueError(
+            "M-PESA access token was not returned."
+        )
+
+    return access_token
+
+
+def normalize_phone(phone):
+
+    phone = str(phone).strip()
+
+    phone = (
+        phone
+        .replace(" ", "")
+        .replace("-", "")
+    )
+
+    if phone.startswith("+254"):
+        phone = phone[1:]
+
+    elif phone.startswith("07"):
+        phone = "254" + phone[1:]
+
+    elif phone.startswith("01"):
+        phone = "254" + phone[1:]
+
+    if not phone.startswith("254"):
+        raise ValueError(
+            "Enter a valid Kenyan M-PESA phone number."
+        )
+
+    if len(phone) != 12:
+        raise ValueError(
+            "Enter a valid Kenyan M-PESA phone number."
+        )
+
+    return phone
+
+
+def generate_password(timestamp):
+
+    shortcode = os.getenv(
+        "MPESA_SHORTCODE"
+    )
+
+    passkey = os.getenv(
+        "MPESA_PASSKEY"
+    )
+
+    if not shortcode or not passkey:
+        raise ImproperlyConfigured(
+            "M-PESA shortcode/passkey not configured."
+        )
+
+    raw = (
+        f"{shortcode}"
+        f"{passkey}"
+        f"{timestamp}"
+    )
+
+    return base64.b64encode(
+        raw.encode()
+    ).decode()
+
+
+logger = logging.getLogger(__name__)
+
+def initiate_daraja_stk_push(
+    amount,
+    phone_number,
+    account_reference,
+    transaction_desc,
+):
+    access_token = get_mpesa_access_token()
+
+    shortcode = os.getenv("MPESA_SHORTCODE")
+    callback_url = os.getenv("MPESA_CALLBACK_URL")
+
+    phone_number = normalize_phone(phone_number)
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    password = generate_password(timestamp)
+
+    payload = {
+        "BusinessShortCode": shortcode,
+        "Password": password,
+        "Timestamp": timestamp,
+        "TransactionType": "CustomerPayBillOnline",
+        "Amount": int(amount),
+        "PartyA": phone_number,
+        "PartyB": shortcode,
+        "PhoneNumber": phone_number,
+        "CallBackURL": callback_url,
+        "AccountReference": account_reference,
+        "TransactionDesc": transaction_desc,
+    }
+
+    # Log the payload for debugging
+    logger.info("STK Push payload: %s", payload)
+
+    response = requests.post(
+        f"{get_mpesa_base_url()}/mpesa/stkpush/v1/processrequest",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+
+    # Log Daraja response
+    logger.info("Daraja response: %s", response.text)
+
+    if not response.ok:
+        raise ValueError(response.text)
+
+    return response.json()
+
+
+def initiate_simulated_stk_push(
+    amount,
+    phone_number,
+    account_reference,
+):
+    """
+    Local M-PESA simulation.
+
+    This does NOT contact Safaricom.
+    It only generates identifiers that behave
+    like an STK Push initiation response.
+    """
+
+    return {
+        "ResponseCode": "0",
+        "ResponseDescription": "Success. Request accepted for processing",
+        "CustomerMessage": (
+            "SIMULATION: Check your phone and "
+            "confirm the payment."
+        ),
+        "MerchantRequestID": (
+            f"SIM-MERCHANT-{uuid.uuid4().hex[:16].upper()}"
+        ),
+        "CheckoutRequestID": (
+            f"SIM-CHECKOUT-{uuid.uuid4().hex[:16].upper()}"
+        ),
+    }

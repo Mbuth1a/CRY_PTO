@@ -92,11 +92,46 @@ class WalletTransaction(models.Model):
         blank=True,
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    merchant_request_id = models.CharField(
+        max_length=100,
+        blank=True,
+        db_index=True,
+    )
+
+    checkout_request_id = models.CharField(
+    max_length=100,
+    blank=True,
+    unique=True,
+    null=True,
+    db_index=True,
+    )
+
+    mpesa_receipt_number = models.CharField(
+        max_length=100,
+        blank=True,
+        db_index=True,
+    )
+
+    phone_number = models.CharField(
+        max_length=20,
+        blank=True,
+    )
+
+    result_code = models.IntegerField(
+        null=True,
+        blank=True,
+    )
+
+    result_description = models.TextField(
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
 
     def __str__(self):
         return self.transaction_id
-
 
 class IdempotencyRequest(models.Model):
 
